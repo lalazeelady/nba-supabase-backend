@@ -7,6 +7,26 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// Server-side phone validation (NANP). Mirrors the client-side check on
+// /apply/2/step-4-contact so submissions that bypass the form (direct
+// POSTs, broken-JS browsers) are caught here instead of wasting a
+// CallTools call and triggering a Resend alert. Accepts either 10 digits
+// or 11 with a leading 1 (the E.164 formatter below already handles both).
+function validatePhone(raw: string): "wrong_length" | "nanp_violation" | "all_same_digit" | null {
+  const digits = (raw || "").replace(/\D/g, "");
+  let canonical: string;
+  if (digits.length === 10) canonical = digits;
+  else if (digits.length === 11 && digits[0] === "1") canonical = digits.slice(1);
+  else return "wrong_length";
+  // NANP: area code (digit 0) and exchange code (digit 3) must each start with 2-9.
+  // Catches placeholders like 5551234567 (exchange 123 starts with 1) and real-world
+  // CallTools rejects like 9290898075 (exchange 089 starts with 0).
+  if (canonical[0] < "2" || canonical[3] < "2") return "nanp_violation";
+  // Reject all-same-digit (e.g. 2222222222, 9999999999).
+  if (/^(\d)\1{9}$/.test(canonical)) return "all_same_digit";
+  return null;
+}
+
 interface LeadPayload {
   transaction_id: string;
   state: string;
@@ -71,6 +91,36 @@ Deno.serve(async (req: Request) => {
       });
 
       // Return 200 so the bot thinks it succeeded
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Lead submitted successfully",
+          transaction_id: payload.transaction_id,
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    // --- Phone validation (NANP) ---
+    // Drop invalid numbers into bot_drops with detection_reason `invalid_phone`
+    // instead of inserting to leads + calling CallTools + emailing on failure.
+    // CallTools rejects these server-side anyway; this just silences the noise.
+    const phoneFailReason = validatePhone(payload.phone);
+    if (phoneFailReason) {
+      console.warn(`Invalid phone (${phoneFailReason}): IP=${clientIp}, phone=${payload.phone}`);
+
+      await supabase.from("bot_drops").insert({
+        ip_address: clientIp,
+        user_agent: req.headers.get("user-agent") || "unknown",
+        detection_reason: `invalid_phone:${phoneFailReason}`,
+        form_duration_ms: formDuration,
+        raw_payload: payload,
+      });
+
+      // Same fake-200 contract as the bot path so the client flow is consistent.
       return new Response(
         JSON.stringify({
           success: true,
