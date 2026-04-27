@@ -6,18 +6,20 @@
 -- function returns immediately without contacting Google, so it is safe
 -- to leave this cron enabled while we are still inspecting Ringba payloads.
 --
--- Two settings need to be set on the database for the cron call to
--- authenticate against the edge function:
+-- Authentication: the cron call must send the same value the edge function
+-- has in its UPLOADER_INVOKE_SECRET secret. Because Supabase managed
+-- projects do not allow `alter database ... set` from the SQL Editor, the
+-- secret is stored in Supabase Vault and read at cron-fire time. Run this
+-- once in the SQL Editor before the cron will authenticate successfully:
 --
---   alter database postgres set "app.settings.supabase_url"
---     to 'https://quhxbgsgtfvrasyjvaba.supabase.co';
---   alter database postgres set "app.settings.uploader_invoke_secret"
---     to '<value of UPLOADER_INVOKE_SECRET edge function secret>';
+--   select vault.create_secret(
+--     '<value of UPLOADER_INVOKE_SECRET edge function secret>',
+--     'uploader_invoke_secret'
+--   );
 --
--- These are run once, manually, in the Supabase SQL editor — they hold
--- non-secret config and a shared secret used only by the cron→function
--- call. They are intentionally kept out of this migration so the secret
--- never lands in source control.
+-- The Vault row holds the secret encrypted at rest. It is intentionally
+-- kept out of this migration so the secret never lands in source control.
+-- The supabase URL is hardcoded below — it is not secret.
 
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
@@ -36,10 +38,10 @@ select cron.schedule(
   '*/15 * * * *',
   $cron$
   select net.http_post(
-    url := current_setting('app.settings.supabase_url', true) || '/functions/v1/upload-google-offline-conversions',
+    url := 'https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/upload-google-offline-conversions',
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
-      'x-invoke-secret', current_setting('app.settings.uploader_invoke_secret', true)
+      'x-invoke-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'uploader_invoke_secret')
     ),
     body := '{}'::jsonb
   ) as request_id;

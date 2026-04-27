@@ -222,7 +222,9 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
-  if (req.method !== "POST") {
+  // Ringba pixels default to GET with all fields in the query string;
+  // other integrations may POST JSON or form-encoded. Accept both.
+  if (req.method !== "POST" && req.method !== "GET") {
     return new Response(
       JSON.stringify({ error: "Method not allowed" }),
       { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -249,7 +251,14 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
 
-  const rawPayload = await parseRequestBody(req).catch(() => ({}));
+  // Always merge query-string fields with the body. Ringba GET pixels send
+  // everything in the URL; some POST setups also pass a few fields there.
+  // Body fields win over query-string fields when both exist.
+  const queryPayload = Object.fromEntries(url.searchParams.entries());
+  const bodyPayload = req.method === "POST"
+    ? await parseRequestBody(req).catch(() => ({}))
+    : {};
+  const rawPayload = { ...queryPayload, ...(bodyPayload as Record<string, unknown>) };
   const flat = rawPayload as Record<string, unknown>;
 
   // Some Ringba setups nest data under "tag", "data", or "call". Merge the
