@@ -69,6 +69,30 @@ const FIELD_VARIANTS = {
   currency_code: [
     "currency_code", "currencyCode", "currency",
   ],
+  // Enhanced Conversions for Leads PII: forwarded by Ringba from CallTools
+  // tags when available (e.g. lead originated from a completed form). For
+  // direct callers Ringba may only have caller_id; we still upload with
+  // hashed phone as the lone userIdentifier.
+  caller_email: [
+    "email", "callerEmail", "caller_email", "user_email", "userEmail",
+  ],
+  caller_first_name: [
+    "first_name", "firstName", "fname", "first",
+  ],
+  caller_last_name: [
+    "last_name", "lastName", "lname", "last",
+  ],
+  caller_zip: [
+    "zip", "zip_code", "zipCode", "postal_code", "postalCode",
+  ],
+  caller_state: [
+    "state", "region", "regionCode", "region_code",
+  ],
+  publisher: [
+    "pub", "Pub",
+    "publisher", "Publisher", "publisher_name", "publisherName",
+    "tag:Publisher:Name", "tag:Publisher:name",
+  ],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -280,9 +304,47 @@ Deno.serve(async (req: Request) => {
   const transaction_id = pick(merged, FIELD_VARIANTS.transaction_id);
   const claimed_lead_id = pick(merged, FIELD_VARIANTS.lead_id);
   const conversion_value = parseNumber(pick(merged, FIELD_VARIANTS.conversion_value)) ?? 0;
+  const parsedConvTime = parseTimestamp(pick(merged, FIELD_VARIANTS.conversion_time));
+  // Defend against Ringba sending "1/1/0001 12:00:00 AM" for missing
+  // ConvertedTime tags (V8 mangles year 0001 into 2001). If the parsed
+  // year is implausible, fall back to postback receipt time so we don't
+  // poison Google with a conversion that pre-dates the click.
   const conversion_time =
-    parseTimestamp(pick(merged, FIELD_VARIANTS.conversion_time)) ?? new Date();
+    parsedConvTime && parsedConvTime.getUTCFullYear() >= 2024
+      ? parsedConvTime
+      : new Date();
   const currency_code = (pick(merged, FIELD_VARIANTS.currency_code) || "USD").toUpperCase();
+  const caller_email = pick(merged, FIELD_VARIANTS.caller_email);
+  const caller_first_name = pick(merged, FIELD_VARIANTS.caller_first_name);
+  const caller_last_name = pick(merged, FIELD_VARIANTS.caller_last_name);
+  const caller_zip = pick(merged, FIELD_VARIANTS.caller_zip);
+  const caller_state = pick(merged, FIELD_VARIANTS.caller_state);
+  const publisher = pick(merged, FIELD_VARIANTS.publisher);
+
+  // Ingress filter: only NBA-publisher postbacks become rows.
+  // Other publishers' postbacks are logged for audit then dropped — we don't
+  // own their attribution and uploading them to NBA's Google Ads would be
+  // incorrect. Return 200 so Ringba does not retry.
+  if ((publisher || "").trim().toUpperCase() !== "NBA") {
+    await supabase.from("api_logs").insert({
+      lead_id: null,
+      transaction_id: transaction_id || ringba_call_id || "ringba-unknown",
+      caller_id: caller_id || "",
+      request_payload: { source: "ringba-webhook", raw: rawPayload } as object,
+      response_payload: {
+        skipped: true,
+        reason: "non-nba-publisher",
+        publisher: publisher || null,
+      } as object,
+      http_status: 200,
+      success: true,
+      error_message: null,
+    });
+    return new Response(
+      JSON.stringify({ ok: true, stored: false, skipped: "non-nba-publisher" }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
 
   const dedupe_key = buildDedupeKey({
     ringba_call_id,
@@ -299,8 +361,15 @@ Deno.serve(async (req: Request) => {
   });
 
   const hasClickId = Boolean(gclid || gbraid || wbraid);
+  // ECL-eligible: we have either matched a lead (so the uploader will pull
+  // full PII via JOIN) or Ringba forwarded enough postback PII to send
+  // hashed userIdentifiers. Phone alone (caller_id) is enough — Google's
+  // ECL match works on hashed phone for Android-account-linked users.
+  const hasEclData = Boolean(
+    match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
+  );
   let status: string;
-  if (hasClickId && conversion_value > 0) {
+  if ((hasClickId || hasEclData) && conversion_value > 0) {
     status = "ready_to_upload";
   } else if (match.lead_id) {
     status = "matched";
@@ -340,10 +409,16 @@ Deno.serve(async (req: Request) => {
         conversion_time: conversion_time.toISOString(),
         conversion_value,
         currency_code,
+        caller_email,
+        caller_first_name,
+        caller_last_name,
+        caller_zip,
+        caller_state,
+        publisher,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
         google_ads_conversion_action_id:
           Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE") || null,
-        google_ads_conversion_action_name: "Call Converted - Revenue",
+        google_ads_conversion_action_name: "CallConvertOffline",
         raw_payload: rawPayload,
         dedupe_key,
       })

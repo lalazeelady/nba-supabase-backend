@@ -18,6 +18,20 @@ export interface ConversionEvent {
   google_ads_customer_id: string | null;
   google_ads_conversion_action_id: string | null;
   google_ads_conversion_action_name: string | null;
+
+  // Enhanced Conversions for Leads: first-party PII to send hashed alongside
+  // (or instead of) adIdentifiers. Matched events should be enriched with
+  // lead-table PII before reaching the provider; unmatched events fall back
+  // to whatever Ringba forwarded (e.g. caller_id only).
+  pii?: {
+    email?: string | null;
+    phone?: string | null;        // any format; provider normalizes to E.164
+    first_name?: string | null;
+    last_name?: string | null;
+    zip?: string | null;          // sent plaintext per Google
+    state?: string | null;        // ISO 3166-2 region code; plaintext
+    country?: string | null;      // ISO 3166-1 alpha-2; default "US"
+  };
 }
 
 export type UploadOutcome =

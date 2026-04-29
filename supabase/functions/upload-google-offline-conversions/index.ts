@@ -69,13 +69,19 @@ Deno.serve(async (req: Request) => {
     Number.isFinite(limitParam) && limitParam > 0 ? limitParam : DEFAULT_LIMIT,
   );
 
+  // We pull a lot of fields per row because the Data Manager provider
+  // builds Enhanced-Conversion-for-Leads userIdentifiers from caller PII
+  // (email, phone, name, zip, state). Matched events also get enriched
+  // from the leads table below.
+  const SELECT =
+    "id, conversion_time, conversion_value, currency_code, gclid, gbraid, wbraid, dedupe_key, " +
+    "google_ads_customer_id, google_ads_conversion_action_id, google_ads_conversion_action_name, " +
+    "upload_attempts, status, lead_id, caller_id, " +
+    "caller_email, caller_first_name, caller_last_name, caller_zip, caller_state";
+
   let query = supabase
     .from("offline_conversion_events")
-    .select(
-      "id, conversion_time, conversion_value, currency_code, gclid, gbraid, wbraid, dedupe_key, " +
-      "google_ads_customer_id, google_ads_conversion_action_id, google_ads_conversion_action_name, " +
-      "upload_attempts, status",
-    )
+    .select(SELECT)
     .eq("status", "ready_to_upload")
     .lt("upload_attempts", MAX_ATTEMPTS)
     .order("created_at", { ascending: true })
@@ -92,11 +98,7 @@ Deno.serve(async (req: Request) => {
     // Manual reprocess: also allow rows in failed/uploaded if explicitly named.
     query = supabase
       .from("offline_conversion_events")
-      .select(
-        "id, conversion_time, conversion_value, currency_code, gclid, gbraid, wbraid, dedupe_key, " +
-        "google_ads_customer_id, google_ads_conversion_action_id, google_ads_conversion_action_name, " +
-        "upload_attempts, status",
-      )
+      .select(SELECT)
       .in("id", ids);
   }
 
@@ -120,8 +122,46 @@ Deno.serve(async (req: Request) => {
     skipped_max_attempts: 0,
   };
 
+  // Pre-fetch lead PII for any matched rows in one query, then merge per row.
+  // We use leads PII over caller_* fields when both exist, since leads is the
+  // canonical source (the caller_* fields are only what Ringba forwarded).
+  const leadIds = Array.from(
+    new Set((rows ?? []).map((r) => r.lead_id).filter((x): x is string => !!x)),
+  );
+  type LeadPii = { email: string | null; phone: string | null; first_name: string | null; last_name: string | null; zip: string | null; state: string | null };
+  const leadsById = new Map<string, LeadPii>();
+  if (leadIds.length > 0) {
+    const { data: leadRows } = await supabase
+      .from("leads")
+      .select("id, email, phone, first_name, last_name, zip, state")
+      .in("id", leadIds);
+    for (const lr of leadRows ?? []) {
+      leadsById.set(lr.id as string, {
+        email: (lr.email as string) ?? null,
+        phone: (lr.phone as string) ?? null,
+        first_name: (lr.first_name as string) ?? null,
+        last_name: (lr.last_name as string) ?? null,
+        zip: (lr.zip as string) ?? null,
+        state: (lr.state as string) ?? null,
+      });
+    }
+  }
+
   for (const row of rows ?? []) {
-    if (!row.gclid && !row.gbraid && !row.wbraid) {
+    const hasClick = Boolean(row.gclid || row.gbraid || row.wbraid);
+    const lead = row.lead_id ? leadsById.get(row.lead_id as string) : undefined;
+    const pii = {
+      email: lead?.email ?? row.caller_email ?? null,
+      phone: lead?.phone ?? row.caller_id ?? null,
+      first_name: lead?.first_name ?? row.caller_first_name ?? null,
+      last_name: lead?.last_name ?? row.caller_last_name ?? null,
+      zip: lead?.zip ?? row.caller_zip ?? null,
+      state: lead?.state ?? row.caller_state ?? null,
+      country: "US",
+    };
+    const hasPii = Boolean(pii.email || pii.phone || (pii.first_name && pii.last_name && pii.zip));
+
+    if (!hasClick && !hasPii) {
       counters.skipped_no_click++;
       continue;
     }
@@ -142,6 +182,7 @@ Deno.serve(async (req: Request) => {
       google_ads_customer_id: row.google_ads_customer_id,
       google_ads_conversion_action_id: row.google_ads_conversion_action_id,
       google_ads_conversion_action_name: row.google_ads_conversion_action_name,
+      pii,
     };
 
     const nowIso = new Date().toISOString();
