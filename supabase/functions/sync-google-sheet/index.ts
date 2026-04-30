@@ -1,13 +1,18 @@
 // sync-google-sheet
 //
 // Pushes NBA-publisher revenue conversion events into a Google Sheet that
-// Google Ads picks up via scheduled offline-conversion + ECL upload.
+// Google Ads picks up via scheduled offline-conversion upload.
 //
-// Reads the same v_google_sheet_export_unsynced view as export-google-sheet-csv
-// (column order matches the user's template), authenticates to the Google
-// Sheets API as a service account, appends new rows below the existing
-// header, then stamps sheet_synced_at on the emitted rows so they don't
-// re-emit.
+// Reads the v_google_sheet_export_unsynced view (15 columns: 8 click-conversion
+// fields + 7 PII enrichment fields for Enhanced Conversions for Offline
+// Conversions), authenticates to the Google Sheets API as a service account,
+// appends new rows below the existing header, then stamps sheet_synced_at on
+// the emitted rows so they don't re-emit.
+//
+// PII handling: email, phone, first name, and last name are SHA-256 hashed
+// before being written to the Sheet, per Google's Enhanced Conversions hashing
+// spec. ip address, session attributes, and user agent go raw (Google does not
+// require those hashed).
 //
 // Auth (inbound): shared secret in `x-invoke-secret` header.
 //
@@ -42,6 +47,13 @@ interface ExportRow {
   conversion_value: number | string | null;
   conversion_currency: string | null;
   order_id: string | null;
+  ip_address: string | null;
+  email: string | null;
+  phone: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  session_attributes: string | null;
+  user_agent: string | null;
 }
 
 interface ServiceAccountJson {
@@ -50,9 +62,49 @@ interface ServiceAccountJson {
   token_uri?: string;
 }
 
-function rowToValues(r: ExportRow): (string | number)[] {
-  // 8 columns matching v_google_sheet_export_unsynced + the LiveImport tab
-  // header. Click-conversion-only — no PII columns. ECL pipeline is separate.
+// --- Hashing helpers (Google Enhanced Conversions spec) ---
+// All hashes: SHA-256, lowercase hex output.
+
+async function sha256Hex(s: string): Promise<string> {
+  const data = new TextEncoder().encode(s);
+  const hashBuf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Email: lowercase + trim
+async function hashEmail(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim().toLowerCase();
+  return cleaned ? await sha256Hex(cleaned) : "";
+}
+
+// Phone: E.164 already from view; just trim
+async function hashPhone(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim();
+  return cleaned ? await sha256Hex(cleaned) : "";
+}
+
+// First/last name: lowercase + trim + strip non-alpha
+async function hashName(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim().toLowerCase().replace(/[^a-z]/g, "");
+  return cleaned ? await sha256Hex(cleaned) : "";
+}
+
+async function rowToValues(r: ExportRow): Promise<(string | number)[]> {
+  // 15 columns matching the LiveImport tab header in the user's Sheet:
+  // Google Click ID, gbraid, wbraid, Conversion Name, Conversion Time,
+  // Conversion Value, Conversion Currency, Order ID, ip address, email,
+  // phone, first name, last name, session attributes, user agent.
+  const [emailHash, phoneHash, firstHash, lastHash] = await Promise.all([
+    hashEmail(r.email),
+    hashPhone(r.phone),
+    hashName(r.first_name),
+    hashName(r.last_name),
+  ]);
   return [
     r.google_click_id ?? "",
     r.gbraid ?? "",
@@ -62,6 +114,13 @@ function rowToValues(r: ExportRow): (string | number)[] {
     r.conversion_value ?? "",
     r.conversion_currency ?? "",
     r.order_id ?? "",
+    r.ip_address ?? "",
+    emailHash,
+    phoneHash,
+    firstHash,
+    lastHash,
+    r.session_attributes ?? "",
+    r.user_agent ?? "",
   ];
 }
 
@@ -148,9 +207,6 @@ async function appendToSheet(args: {
   tabName: string;
   values: (string | number)[][];
 }): Promise<{ updates: { updatedRows?: number; updatedRange?: string } }> {
-  // Range = just the tab name → Sheets finds the next empty row.
-  // valueInputOption=USER_ENTERED so '+19...' phones aren't reformatted to numbers.
-  // insertDataOption=INSERT_ROWS so existing rows below aren't overwritten.
   const range = encodeURIComponent(args.tabName);
   const url =
     `https://sheets.googleapis.com/v4/spreadsheets/${args.spreadsheetId}` +
@@ -232,7 +288,8 @@ Deno.serve(async (req: Request) => {
     .from("v_google_sheet_export_unsynced")
     .select(
       "event_id, google_click_id, gbraid, wbraid, " +
-      "conversion_name, conversion_time, conversion_value, conversion_currency, order_id",
+      "conversion_name, conversion_time, conversion_value, conversion_currency, order_id, " +
+      "ip_address, email, phone, first_name, last_name, session_attributes, user_agent",
     );
   if (limit !== null) query = query.limit(limit);
 
@@ -253,10 +310,9 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const values = rows.map(rowToValues);
+  const values = await Promise.all(rows.map(rowToValues));
 
   if (dryRun) {
-    // Verify auth still works (so a "live" follow-up can't fail on creds).
     let authOk = false;
     let authError: string | null = null;
     try {
@@ -308,7 +364,6 @@ Deno.serve(async (req: Request) => {
   }
 
   // Append succeeded — stamp sheet_synced_at so we don't re-emit these rows.
-  // Done in chunks to stay under PostgREST's IN-list size cap.
   let markedCount = 0;
   const ids = rows.map((r) => r.event_id);
   const CHUNK = 500;
@@ -319,8 +374,6 @@ Deno.serve(async (req: Request) => {
       .update({ sheet_synced_at: new Date().toISOString() }, { count: "exact" })
       .in("id", slice);
     if (updErr) {
-      // The Sheet append already happened — return partial success so the
-      // caller knows there are now duplicates risk on the next run.
       console.error("sync-google-sheet stamp error:", updErr);
       return new Response(
         JSON.stringify({

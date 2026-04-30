@@ -1,29 +1,35 @@
 // export-google-sheet-csv
 //
 // Returns NBA-publisher revenue conversion events as a CSV in the column
-// order expected by the user's Google Ads scheduled offline-conversion +
-// ECL upload template (see migrations/20260428020000_create_google_sheet_export_view).
+// order expected by the user's Google Ads scheduled offline-conversion
+// upload template (15-column Enhanced-Conversions-for-Offline-Conversions
+// template).
 //
-// Phase 1: this endpoint is read-only — the operator pulls the CSV manually
-// and pastes/uploads it into the prepared Google Sheet. Phase 2 will add a
-// Sheets API write directly from this function (or a paired cron).
+// PII handling: email, phone, first name, and last name are SHA-256 hashed
+// in the output, matching what the live syncer (sync-google-sheet) writes.
+// ip address, session attributes, and user agent go raw.
 //
-// Auth: shared secret in `x-invoke-secret` header (same secret as the
-// uploader function, since this is a peer internal endpoint).
+// This endpoint is the manual fallback / debug tool. The cron-driven
+// sync-google-sheet edge function does the routine push. Use this CSV
+// when you want to inspect what's queued without writing to the Sheet.
+//
+// Auth: shared secret in `x-invoke-secret` header.
 //
 // Query params:
-//   ?mark_synced=true  — stamp sheet_synced_at=now() on emitted rows so
-//                        they don't appear in the next pull. Default false
-//                        (preview mode).
-//   ?limit=N           — cap emitted rows (default unlimited).
+//   ?mark_synced=true  — stamp sheet_synced_at=now() on emitted rows.
+//   ?limit=N           — cap emitted rows (default unlimited, max 5000).
 //   ?format=json       — return JSON array instead of CSV.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/cors.ts";
 
-// CSV header matching the simplified click-conversion-only template.
-// Order matches v_google_sheet_export_unsynced.
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Client-Info, Apikey, x-webhook-secret, x-invoke-secret",
+};
+
 const CSV_HEADERS = [
   "Google Click ID",
   "gbraid",
@@ -33,6 +39,13 @@ const CSV_HEADERS = [
   "Conversion Value",
   "Conversion Currency",
   "Order ID",
+  "ip address",
+  "email",
+  "phone",
+  "first name",
+  "last name",
+  "session attributes",
+  "user agent",
 ];
 
 interface ExportRow {
@@ -45,24 +58,66 @@ interface ExportRow {
   conversion_value: number | string | null;
   conversion_currency: string | null;
   order_id: string | null;
+  ip_address: string | null;
+  email: string | null;
+  phone: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  session_attributes: string | null;
+  user_agent: string | null;
+}
+
+// --- Hashing helpers (mirror sync-google-sheet) ---
+
+async function sha256Hex(s: string): Promise<string> {
+  const data = new TextEncoder().encode(s);
+  const hashBuf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function hashEmail(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim().toLowerCase();
+  return cleaned ? await sha256Hex(cleaned) : "";
+}
+
+async function hashPhone(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim();
+  return cleaned ? await sha256Hex(cleaned) : "";
+}
+
+async function hashName(s: string | null): Promise<string> {
+  if (!s) return "";
+  const cleaned = s.trim().toLowerCase().replace(/[^a-z]/g, "");
+  return cleaned ? await sha256Hex(cleaned) : "";
 }
 
 function csvEscape(v: unknown): string {
   if (v === null || v === undefined) return "";
   const s = String(v);
-  // RFC 4180: wrap in quotes and double any embedded quotes if the value
-  // contains comma, quote, or newline.
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
 }
 
-function rowToCsv(r: ExportRow): string {
+async function rowToCsv(r: ExportRow): Promise<string> {
+  const [emailHash, phoneHash, firstHash, lastHash] = await Promise.all([
+    hashEmail(r.email),
+    hashPhone(r.phone),
+    hashName(r.first_name),
+    hashName(r.last_name),
+  ]);
   return [
     r.google_click_id, r.gbraid, r.wbraid,
     r.conversion_name, r.conversion_time,
     r.conversion_value, r.conversion_currency, r.order_id,
+    r.ip_address,
+    emailHash, phoneHash, firstHash, lastHash,
+    r.session_attributes, r.user_agent,
   ].map(csvEscape).join(",");
 }
 
@@ -97,7 +152,8 @@ Deno.serve(async (req: Request) => {
     .from("v_google_sheet_export_unsynced")
     .select(
       "event_id, google_click_id, gbraid, wbraid, " +
-      "conversion_name, conversion_time, conversion_value, conversion_currency, order_id",
+      "conversion_name, conversion_time, conversion_value, conversion_currency, order_id, " +
+      "ip_address, email, phone, first_name, last_name, session_attributes, user_agent",
     );
 
   if (limit !== null) query = query.limit(limit);
@@ -113,8 +169,6 @@ Deno.serve(async (req: Request) => {
 
   const rows = (data ?? []) as ExportRow[];
 
-  // Optionally stamp sheet_synced_at so these rows don't re-emit on the
-  // next pull. Done in chunks to stay under PostgREST's IN-list size cap.
   let markedCount = 0;
   if (markSynced && rows.length > 0) {
     const ids = rows.map((r) => r.event_id);
@@ -153,7 +207,8 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const csv = [CSV_HEADERS.join(","), ...rows.map(rowToCsv)].join("\r\n") + "\r\n";
+  const csvBodyRows = await Promise.all(rows.map(rowToCsv));
+  const csv = [CSV_HEADERS.join(","), ...csvBodyRows].join("\r\n") + "\r\n";
 
   return new Response(csv, {
     status: 200,
