@@ -9,10 +9,11 @@
 // appends new rows below the existing header, then stamps sheet_synced_at on
 // the emitted rows so they don't re-emit.
 //
-// PII handling: email, phone, first name, and last name are SHA-256 hashed
-// before being written to the Sheet, per Google's Enhanced Conversions hashing
-// spec. ip address, session attributes, and user agent go raw (Google does not
-// require those hashed).
+// PII handling: email, phone, first name, last name, ip address, session
+// attributes, and user agent are all written RAW to the Sheet. Google Data
+// Manager hashes email/phone/first/last server-side at ingest, so we don't
+// hash here. (If you switch to a Schedule-style upload that requires
+// pre-hashing, restore the hashing helpers from commit 642a642.)
 //
 // Auth (inbound): shared secret in `x-invoke-secret` header.
 //
@@ -62,49 +63,12 @@ interface ServiceAccountJson {
   token_uri?: string;
 }
 
-// --- Hashing helpers (Google Enhanced Conversions spec) ---
-// All hashes: SHA-256, lowercase hex output.
-
-async function sha256Hex(s: string): Promise<string> {
-  const data = new TextEncoder().encode(s);
-  const hashBuf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-// Email: lowercase + trim
-async function hashEmail(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim().toLowerCase();
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
-// Phone: E.164 already from view; just trim
-async function hashPhone(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim();
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
-// First/last name: lowercase + trim + strip non-alpha
-async function hashName(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim().toLowerCase().replace(/[^a-z]/g, "");
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
-async function rowToValues(r: ExportRow): Promise<(string | number)[]> {
+function rowToValues(r: ExportRow): (string | number)[] {
   // 15 columns matching the LiveImport tab header in the user's Sheet:
   // Google Click ID, gbraid, wbraid, Conversion Name, Conversion Time,
   // Conversion Value, Conversion Currency, Order ID, ip address, email,
   // phone, first name, last name, session attributes, user agent.
-  const [emailHash, phoneHash, firstHash, lastHash] = await Promise.all([
-    hashEmail(r.email),
-    hashPhone(r.phone),
-    hashName(r.first_name),
-    hashName(r.last_name),
-  ]);
+  // Data Manager hashes email/phone/first/last on its end at ingest.
   return [
     r.google_click_id ?? "",
     r.gbraid ?? "",
@@ -115,10 +79,10 @@ async function rowToValues(r: ExportRow): Promise<(string | number)[]> {
     r.conversion_currency ?? "",
     r.order_id ?? "",
     r.ip_address ?? "",
-    emailHash,
-    phoneHash,
-    firstHash,
-    lastHash,
+    r.email ?? "",
+    r.phone ?? "",
+    r.first_name ?? "",
+    r.last_name ?? "",
     r.session_attributes ?? "",
     r.user_agent ?? "",
   ];
@@ -310,7 +274,7 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const values = await Promise.all(rows.map(rowToValues));
+  const values = rows.map(rowToValues);
 
   if (dryRun) {
     let authOk = false;

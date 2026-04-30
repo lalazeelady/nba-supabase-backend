@@ -5,9 +5,9 @@
 // upload template (15-column Enhanced-Conversions-for-Offline-Conversions
 // template).
 //
-// PII handling: email, phone, first name, and last name are SHA-256 hashed
-// in the output, matching what the live syncer (sync-google-sheet) writes.
-// ip address, session attributes, and user agent go raw.
+// PII handling: all fields (email, phone, first/last name, ip, session
+// attributes, user agent) emitted RAW. Google Data Manager hashes
+// email/phone/first/last server-side at ingest.
 //
 // This endpoint is the manual fallback / debug tool. The cron-driven
 // sync-google-sheet edge function does the routine push. Use this CSV
@@ -67,34 +67,6 @@ interface ExportRow {
   user_agent: string | null;
 }
 
-// --- Hashing helpers (mirror sync-google-sheet) ---
-
-async function sha256Hex(s: string): Promise<string> {
-  const data = new TextEncoder().encode(s);
-  const hashBuf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function hashEmail(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim().toLowerCase();
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
-async function hashPhone(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim();
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
-async function hashName(s: string | null): Promise<string> {
-  if (!s) return "";
-  const cleaned = s.trim().toLowerCase().replace(/[^a-z]/g, "");
-  return cleaned ? await sha256Hex(cleaned) : "";
-}
-
 function csvEscape(v: unknown): string {
   if (v === null || v === undefined) return "";
   const s = String(v);
@@ -104,19 +76,13 @@ function csvEscape(v: unknown): string {
   return s;
 }
 
-async function rowToCsv(r: ExportRow): Promise<string> {
-  const [emailHash, phoneHash, firstHash, lastHash] = await Promise.all([
-    hashEmail(r.email),
-    hashPhone(r.phone),
-    hashName(r.first_name),
-    hashName(r.last_name),
-  ]);
+function rowToCsv(r: ExportRow): string {
   return [
     r.google_click_id, r.gbraid, r.wbraid,
     r.conversion_name, r.conversion_time,
     r.conversion_value, r.conversion_currency, r.order_id,
     r.ip_address,
-    emailHash, phoneHash, firstHash, lastHash,
+    r.email, r.phone, r.first_name, r.last_name,
     r.session_attributes, r.user_agent,
   ].map(csvEscape).join(",");
 }
@@ -207,8 +173,7 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  const csvBodyRows = await Promise.all(rows.map(rowToCsv));
-  const csv = [CSV_HEADERS.join(","), ...csvBodyRows].join("\r\n") + "\r\n";
+  const csv = [CSV_HEADERS.join(","), ...rows.map(rowToCsv)].join("\r\n") + "\r\n";
 
   return new Response(csv, {
     status: 200,
