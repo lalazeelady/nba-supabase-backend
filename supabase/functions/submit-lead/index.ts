@@ -7,6 +7,177 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// --- Caliber Leads partner ingest ---
+// Same lead data we send to CallTools also goes to Caliber Leads, in parallel.
+// Per Caliber's spec the request must be HMAC-SHA256 signed over
+// `${timestamp}.${body}` using a shared secret. Secret + their Supabase anon
+// key are loaded from edge-function env (never the browser).
+const CALIBER_URL = "https://dblgxzhlxcviknamnskj.supabase.co/functions/v1/ingest/nba";
+
+async function hmacSha256Hex(secret: string, data: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(sigBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Map our 4 income buckets to Caliber's 6. Best-effort — both spans are
+// approximate so we pick the bucket that contains the midpoint of ours.
+function mapAnnualIncomeToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "under_50k": return "25_50k";   // could also be lt_25k; pick the common case
+    case "50k_75k": return "50_75k";
+    case "76k_150k": return "100_150k";  // could be 75_100k; pick higher midpoint
+    case "150k_plus": return "gt_150k";
+    default: return undefined;
+  }
+}
+
+// Our form's `employed_full_time` / `employed_part_time` need to be normalized
+// to Caliber's `full_time` / `part_time`. unemployed and retired already match.
+// `self_employed` isn't a value our form collects today.
+function mapEmploymentStatusToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "employed_full_time": return "full_time";
+    case "employed_part_time": return "part_time";
+    case "self_employed": return "self_employed";
+    case "unemployed": return "unemployed";
+    case "retired": return "retired";
+    default: return undefined;  // drop unknown values rather than 400 the request
+  }
+}
+
+// Caliber accepts only us_citizen / non_us_citizen. Our form has us_citizen,
+// non_citizen_legal, and "other" — fold the latter two into non_us_citizen.
+function mapCitizenshipToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "us_citizen": return "us_citizen";
+    case "non_citizen_legal": return "non_us_citizen";
+    case "other": return "non_us_citizen";
+    default: return undefined;
+  }
+}
+
+interface CaliberCallResult {
+  status: number;
+  ok: boolean;
+  body: unknown;
+  error: string | null;
+  // Mapped fields for the leads update.
+  derivedStatus: "success" | "duplicate" | "failed" | "skipped";
+  leadId: string | null;
+  action: string | null;
+}
+
+async function postToCaliber(args: {
+  phoneE164: string;
+  payload: LeadPayload;
+  clientIp: string;
+  userAgent: string;
+  refererUrl: string;
+}): Promise<CaliberCallResult> {
+  const secret = Deno.env.get("CALIBER_HMAC_SECRET") || "";
+  const anonKey = Deno.env.get("CALIBER_ANON_KEY") || "";
+  if (!secret || !anonKey) {
+    return {
+      status: 0, ok: false, body: null, error: "missing CALIBER_HMAC_SECRET or CALIBER_ANON_KEY",
+      derivedStatus: "skipped", leadId: null, action: null,
+    };
+  }
+
+  const body = {
+    consent: {
+      given: !!args.payload.tcpa_consent,
+      timestamp: new Date().toISOString(),
+      ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
+      user_agent: args.userAgent || undefined,
+      url: args.refererUrl || undefined,
+      jornaya_leadid: args.payload.jornaya_leadid || undefined,
+    },
+    contact: {
+      first_name: args.payload.first_name || undefined,
+      last_name: args.payload.last_name || undefined,
+      email: args.payload.email || undefined,
+      phone: args.phoneE164 || undefined,
+      state: args.payload.state || undefined,
+      zip: args.payload.zip || undefined,
+    },
+    attribution: {
+      utm_source: args.payload.utm_source || undefined,
+      utm_medium: args.payload.utm_medium || undefined,
+      utm_campaign: args.payload.utm_campaign || undefined,
+      utm_content: args.payload.utm_content || undefined,
+      utm_term: args.payload.utm_term || undefined,
+    },
+    extended: {
+      // Per Caliber: unknown FIELDS are dropped, but bad VALUES on a known
+      // enum field 400 the whole request — so we map our form values to
+      // Caliber's accepted enum values, returning undefined for anything that
+      // doesn't fit (omitted from the payload entirely).
+      date_of_birth: args.payload.dob || undefined,
+      citizenship: mapCitizenshipToCaliber(args.payload.citizenship),
+      employment_status: mapEmploymentStatusToCaliber(args.payload.employment_status),
+      annual_household_income_range: mapAnnualIncomeToCaliber(args.payload.annual_income),
+    },
+  };
+
+  const bodyStr = JSON.stringify(body);
+  const ts = new Date().toISOString();
+  const signature = "sha256=" + await hmacSha256Hex(secret, `${ts}.${bodyStr}`);
+
+  try {
+    const resp = await fetch(CALIBER_URL, {
+      method: "POST",
+      headers: {
+        "apikey": anonKey,
+        "Content-Type": "application/json",
+        "x-timestamp": ts,
+        "x-signature": signature,
+        // Stable request id keyed off transaction_id so retries within 24h are
+        // idempotent on Caliber's side.
+        "x-request-id": `nba-submit-lead-${args.payload.transaction_id}`,
+      },
+      body: bodyStr,
+    });
+    let respBody: unknown = null;
+    try { respBody = await resp.json(); } catch { /* leave null */ }
+
+    let derivedStatus: CaliberCallResult["derivedStatus"];
+    if (resp.status === 201) derivedStatus = "success";
+    else if (resp.status === 200 || resp.status === 409) derivedStatus = "duplicate";
+    else derivedStatus = "failed";
+
+    const r = (respBody || {}) as Record<string, unknown>;
+    return {
+      status: resp.status,
+      ok: resp.ok,
+      body: respBody,
+      error: null,
+      derivedStatus,
+      leadId: typeof r.lead_id === "string" ? r.lead_id : null,
+      // Caliber doesn't document a separate "action" enum but the 201 vs 200
+      // distinction maps cleanly to created vs duplicate.
+      action: derivedStatus === "success" ? "created"
+            : derivedStatus === "duplicate" ? "duplicate"
+            : null,
+    };
+  } catch (e) {
+    return {
+      status: 0, ok: false, body: null,
+      error: e instanceof Error ? e.message : String(e),
+      derivedStatus: "failed",
+      leadId: null, action: null,
+    };
+  }
+}
+
 // Server-side phone validation (NANP). Mirrors the client-side check on
 // /apply/2/step-4-contact so submissions that bypass the form (direct
 // POSTs, broken-JS browsers) are caught here instead of wasting a
@@ -244,49 +415,66 @@ Deno.serve(async (req: Request) => {
     console.log("CRM Request URL:", crmUrl);
     console.log("CRM Request Body:", crmBody);
 
-    let crmSuccess = false;
-    let crmResponse: any = null;
-    let crmStatus = 0;
-    let crmLeadId = null;
-    let crmAction: string | null = null;
-    let errorMessage = null;
-
-    try {
-      const crmResult = await fetch(crmUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${calltoolsToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(crmBody),
-      });
-
-      crmStatus = crmResult.status;
-      console.log("CRM Response Status:", crmStatus);
-
-      crmResponse = await crmResult.json();
-      console.log("CRM Response:", crmResponse);
-      crmSuccess = crmResult.ok;
-
-      if (crmSuccess && crmResponse) {
-        // Fresh insert returns the contact object with `id`.
-        // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
-        // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
-        crmLeadId = crmResponse.id
-          ?? crmResponse.contact_id
-          ?? crmResponse.uid
-          ?? (Array.isArray(crmResponse.duplicate_contacts) ? crmResponse.duplicate_contacts[0] : null)
-          ?? null;
+    // Fire CallTools and Caliber Leads in parallel. Each has its own try/catch
+    // so one provider's failure doesn't break the other; the lead row stays
+    // accepted regardless. Total response time = max(calltools, caliber)
+    // instead of the sum.
+    const calltoolsPromise = (async () => {
+      let success = false;
+      let response: any = null;
+      let status = 0;
+      let leadId: string | null = null;
+      let action: string | null = null;
+      let error: string | null = null;
+      try {
+        const result = await fetch(crmUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Token ${calltoolsToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(crmBody),
+        });
+        status = result.status;
+        console.log("CRM Response Status:", status);
+        response = await result.json();
+        console.log("CRM Response:", response);
+        success = result.ok;
+        if (success && response) {
+          // Fresh insert returns the contact object with `id`.
+          // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
+          // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
+          leadId = response.id
+            ?? response.contact_id
+            ?? response.uid
+            ?? (Array.isArray(response.duplicate_contacts) ? response.duplicate_contacts[0] : null)
+            ?? null;
+        }
+        action = response?.duplicate_action ?? (response?.id ? "CREATE" : null);
+      } catch (e) {
+        console.error("CRM API error:", e);
+        error = e instanceof Error ? e.message : "Unknown error";
+        success = false;
       }
+      return { success, response, status, leadId, action, error };
+    })();
 
-      // Derive how CallTools handled this submission: MERGE (existing contact) or CREATE (new).
-      crmAction = crmResponse?.duplicate_action
-        ?? (crmResponse?.id ? "CREATE" : null);
-    } catch (error) {
-      console.error("CRM API error:", error);
-      errorMessage = error instanceof Error ? error.message : "Unknown error";
-      crmSuccess = false;
-    }
+    const caliberPromise = postToCaliber({
+      phoneE164: phoneFormatted,
+      payload,
+      clientIp,
+      userAgent: req.headers.get("user-agent") || "",
+      refererUrl: req.headers.get("referer") || "",
+    });
+
+    const [crmResult, caliberResult] = await Promise.all([calltoolsPromise, caliberPromise]);
+
+    const crmSuccess = crmResult.success;
+    const crmResponse = crmResult.response;
+    const crmStatus = crmResult.status;
+    const crmLeadId = crmResult.leadId;
+    const crmAction = crmResult.action;
+    const errorMessage = crmResult.error;
 
     await supabase.from("api_logs").insert({
       lead_id: leadData.id,
@@ -298,6 +486,33 @@ Deno.serve(async (req: Request) => {
       success: crmSuccess,
       error_message: errorMessage,
     });
+
+    // Separate api_logs row for Caliber so the audit trail per provider is
+    // clean and we can filter on response_payload.provider downstream.
+    await supabase.from("api_logs").insert({
+      lead_id: leadData.id,
+      transaction_id: payload.transaction_id,
+      caller_id: phoneFormatted,
+      request_payload: { provider: "caliber_leads", url: CALIBER_URL } as object,
+      response_payload: { provider: "caliber_leads", body: caliberResult.body } as object,
+      http_status: caliberResult.status,
+      success: caliberResult.ok,
+      error_message: caliberResult.error,
+    });
+
+    // Stamp Caliber result on the leads row regardless of CallTools outcome.
+    await supabase
+      .from("leads")
+      .update({
+        caliber_status: caliberResult.derivedStatus,
+        caliber_lead_id: caliberResult.leadId,
+        caliber_action: caliberResult.action,
+        caliber_submitted_at:
+          (caliberResult.derivedStatus === "success" || caliberResult.derivedStatus === "duplicate")
+            ? new Date().toISOString()
+            : null,
+      })
+      .eq("id", leadData.id);
 
     if (crmSuccess) {
       await supabase
