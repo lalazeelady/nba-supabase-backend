@@ -376,10 +376,12 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Fall back to wbraid/gbraid when gclid is absent so click_id is never empty
-    // for valid Google Ads clicks (iOS privacy-safe traffic).
-    const clickId = payload.click_id || payload.wbraid || payload.gbraid || "";
-
+    // gclid / gbraid / wbraid each post to their own named field on CallTools.
+    // No cross-type fallback (e.g. wbraid value into a gclid field) — that
+    // conflation was the root cause of the CallTools -> Ringba User:gclid
+    // mis-mapping we cleaned up on 2026-04-30, where gbraid-shaped values
+    // and UUIDs landed in the gclid column. Each click identifier goes only
+    // where it belongs; if it's not present we send an empty string.
     const crmBody: Record<string, unknown> = {
       transaction_id: payload.transaction_id,
       state: payload.state,
@@ -397,7 +399,7 @@ Deno.serve(async (req: Request) => {
       home_phone_number: phoneFormatted,
       tcpa_consent: String(payload.tcpa_consent),
       jornaya_lead_id: payload.jornaya_leadid || "STATIC_JORNAYA_ID_PLACEHOLDER",
-      click_id: clickId,
+      gclid: payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
       utm_source: payload.utm_source || "",
