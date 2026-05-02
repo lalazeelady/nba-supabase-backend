@@ -69,6 +69,13 @@ function rowToValues(r: ExportRow): (string | number)[] {
   // Conversion Value, Conversion Currency, Order ID, ip address, email,
   // phone, first name, last name, session attributes, user agent.
   // Data Manager hashes email/phone/first/last on its end at ingest.
+  //
+  // Phone is prefixed with `'` so Sheets stores it as text. Without this,
+  // valueInputOption=USER_ENTERED interprets the leading `+` of an E.164
+  // number as a positive-sign and silently strips it, breaking the format
+  // Data Manager (and Google's PII matcher) expect. The apostrophe is
+  // invisible in the cell display.
+  const phoneForSheet = r.phone ? `'${r.phone}` : "";
   return [
     r.google_click_id ?? "",
     r.gbraid ?? "",
@@ -80,7 +87,7 @@ function rowToValues(r: ExportRow): (string | number)[] {
     r.order_id ?? "",
     r.ip_address ?? "",
     r.email ?? "",
-    r.phone ?? "",
+    phoneForSheet,
     r.first_name ?? "",
     r.last_name ?? "",
     r.session_attributes ?? "",

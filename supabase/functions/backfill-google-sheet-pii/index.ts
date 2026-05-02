@@ -315,13 +315,22 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
+    // Prefix phone with `'` so Sheets stores the +country-code as text
+    // rather than stripping it as a positive-number sign. Same fix as in
+    // sync-google-sheet/rowToValues. Apostrophe is invisible in display.
+    // Only applied when we're actually writing — if sheetPhone already
+    // had a value (preserved by merge), don't double-quote it.
+    const mergedPhoneForSheet = (mergedPhone && mergedPhone !== sheetPhone)
+      ? `'${mergedPhone}`
+      : mergedPhone;
+
     const sheetRowNumber = i + 2; // A2 is row 2 → row 2 + i
     updates.push({
       range: `${tabName}!I${sheetRowNumber}:O${sheetRowNumber}`,
       values: [[
         mergedIp,
         mergedEmail,
-        mergedPhone,
+        mergedPhoneForSheet,
         mergedFirst,
         mergedLast,
         sheetSession,
