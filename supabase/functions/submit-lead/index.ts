@@ -99,7 +99,10 @@ async function postToCaliber(args: {
       ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
       user_agent: args.userAgent || undefined,
       url: args.refererUrl || undefined,
-      jornaya_leadid: args.payload.jornaya_leadid || undefined,
+      // Caliber consent field name kept as `jornaya_leadid` per Caliber API
+      // spec (renaming on our side would break their TCPA validation). The
+      // VALUE is now the TrustedForm cert URL going forward.
+      jornaya_leadid: args.payload.trusted_form_cert_url || undefined,
     },
     contact: {
       first_name: args.payload.first_name || undefined,
@@ -178,12 +181,34 @@ async function postToCaliber(args: {
   }
 }
 
-// Server-side phone validation (NANP). Mirrors the client-side check on
-// /apply/2/step-4-contact so submissions that bypass the form (direct
-// POSTs, broken-JS browsers) are caught here instead of wasting a
-// CallTools call and triggering a Resend alert. Accepts either 10 digits
-// or 11 with a leading 1 (the E.164 formatter below already handles both).
-function validatePhone(raw: string): "wrong_length" | "nanp_violation" | "all_same_digit" | null {
+// Server-side phone validation (NANP + assigned-area-code allowlist).
+// Mirrors the client-side check on /apply/2/step-4-contact so submissions
+// that bypass the form (direct POSTs, broken-JS browsers) are caught here
+// instead of wasting a CallTools call and triggering a Resend alert.
+// Accepts either 10 digits or 11 with a leading 1 (the E.164 formatter
+// below already handles both).
+//
+// Allowlist intentionally omits codes NANPA currently has unassigned --
+// e.g. 823, which CallTools rejected on a real submission. When CallTools
+// rejects a future area code that's still in the list, drop it here AND
+// in the matching frontend constant.
+const VALID_NANP_AREA_CODES = new Set<string>([
+  "201","202","203","204","205","206","207","208","209","210","212","213","214","215","216","217","218","219","220","223","224","225","226","228","229","231","234","235","236","239","240","242","246","248","251","252","253","254","256","257","260","262","263","264","267","268","269","270","272","274","276","279","281","283","284","289",
+  "301","302","303","304","305","306","307","308","309","310","312","313","314","315","316","317","318","319","320","321","323","324","325","326","327","329","330","331","332","334","336","337","339","340","341","343","345","346","347","350","351","352","353","354","357","360","361","363","364","365","367","368","369","380","382","385","386",
+  "401","402","403","404","405","406","407","408","409","410","412","413","414","415","416","417","418","419","423","424","425","428","430","431","432","434","435","436","437","438","440","441","442","443","445","447","448","450","457","458","463","464","468","469","470","471","472","473","474","475","478","479","480","483","484",
+  "501","502","503","504","505","506","507","508","509","510","512","513","514","515","516","517","518","519","520","521","522","525","530","531","539","540","541","551","557","559","561","562","563","564","567","570","571","573","574","575","579","580","581","584","585","586","587",
+  "601","602","603","604","605","606","607","608","609","610","612","613","614","615","616","617","618","619","620","623","626","628","630","631","636","639","641","645","646","647","649","650","651","657","659","660","661","662","667","669","670","671","672","678","680","681","682","684","689",
+  "701","702","703","704","705","706","707","708","709","712","713","714","715","716","717","718","719","720","724","725","726","727","728","729","731","732","734","737","738","740","742","743","747","754","757","758","760","762","763","765","769","770","771","772","773","774","775","776","778","779","780","781","782","783","784","785","786","787",
+  "801","802","803","804","805","806","807","808","809","810","812","813","814","815","816","817","818","819","820","825","828","830","831","832","833","838","839","840","843","844","845","847","848","849","850","854","855","856","857","858","859","860","861","862","863","864","865","866","867","868","870","872","873","876","877","878","879","888","902","903","904","905","906","907","908","909","910","912","913","914","915","916","917","918","919","920","925","928","929","930","931","934","936","937","938","939","940","941","943","945","947","948","949","951","952","954","956","959","970","971","972","973","978","979","980","983","984","985","986","989",
+]);
+
+type PhoneFailReason =
+  | "wrong_length"
+  | "nanp_violation"
+  | "all_same_digit"
+  | "bad_area_code";
+
+function validatePhone(raw: string): PhoneFailReason | null {
   const digits = (raw || "").replace(/\D/g, "");
   let canonical: string;
   if (digits.length === 10) canonical = digits;
@@ -195,6 +220,21 @@ function validatePhone(raw: string): "wrong_length" | "nanp_violation" | "all_sa
   if (canonical[0] < "2" || canonical[3] < "2") return "nanp_violation";
   // Reject all-same-digit (e.g. 2222222222, 9999999999).
   if (/^(\d)\1{9}$/.test(canonical)) return "all_same_digit";
+  // Reject NPAs not currently assigned by NANPA (e.g. 823, which CallTools
+  // also rejects). Mirrors the client-side allowlist on step-4-contact.
+  if (!VALID_NANP_AREA_CODES.has(canonical.slice(0, 3))) return "bad_area_code";
+  return null;
+}
+
+// Server-side email validation. Mirrors the client-side regex on
+// /apply/2/step-4-contact, with one extra rule (consecutive dots) that
+// caught a real CallTools rejection: "Osmolinskathy12@gmal..com is a
+// invalid email address for field email". RFC 5322 forbids consecutive
+// dots in the local part and in dot-atom domain labels.
+function validateEmail(raw: string): "invalid_email" | null {
+  const trimmed = (raw || "").trim();
+  if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(trimmed)) return "invalid_email";
+  if (trimmed.includes("..")) return "invalid_email";
   return null;
 }
 
@@ -213,7 +253,7 @@ interface LeadPayload {
   email: string;
   phone: string;
   tcpa_consent: boolean;
-  jornaya_leadid: string;
+  trusted_form_cert_url: string;
   click_id?: string;
   wbraid?: string;
   gbraid?: string;
@@ -305,6 +345,35 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // --- Email validation ---
+    // Same pattern as the phone gate: drop bad emails to bot_drops so we
+    // don't burn a CallTools call and a Resend alert on a known-bad input.
+    // Catches real CallTools rejections like "Osmolinskathy12@gmal..com".
+    const emailFailReason = validateEmail(payload.email);
+    if (emailFailReason) {
+      console.warn(`Invalid email (${emailFailReason}): IP=${clientIp}, email=${payload.email}`);
+
+      await supabase.from("bot_drops").insert({
+        ip_address: clientIp,
+        user_agent: req.headers.get("user-agent") || "unknown",
+        detection_reason: emailFailReason,
+        form_duration_ms: formDuration,
+        raw_payload: payload,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Lead submitted successfully",
+          transaction_id: payload.transaction_id,
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
@@ -323,7 +392,7 @@ Deno.serve(async (req: Request) => {
         phone: payload.phone,
         tcpa_consent: payload.tcpa_consent,
         ip_address: clientIp,
-        jornaya_leadid: payload.jornaya_leadid || "STATIC_JORNAYA_ID_PLACEHOLDER",
+        trusted_form_cert_url: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
         crm_status: "pending",
         gclid: payload.click_id || null,
         wbraid: payload.wbraid || null,
@@ -398,7 +467,10 @@ Deno.serve(async (req: Request) => {
       email: payload.email,
       home_phone_number: phoneFormatted,
       tcpa_consent: String(payload.tcpa_consent),
-      jornaya_lead_id: payload.jornaya_leadid || "STATIC_JORNAYA_ID_PLACEHOLDER",
+      // Outbound CallTools field name kept as `jornaya_lead_id` because the
+      // CallTools side is configured to receive it under that name. The VALUE
+      // is now the TrustedForm cert URL going forward.
+      jornaya_lead_id: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
       gclid: payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
