@@ -7,12 +7,208 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-// Server-side phone validation (NANP). Mirrors the client-side check on
-// /apply/2/step-4-contact so submissions that bypass the form (direct
-// POSTs, broken-JS browsers) are caught here instead of wasting a
-// CallTools call and triggering a Resend alert. Accepts either 10 digits
-// or 11 with a leading 1 (the E.164 formatter below already handles both).
-function validatePhone(raw: string): "wrong_length" | "nanp_violation" | "all_same_digit" | null {
+// --- Caliber Leads partner ingest ---
+// Same lead data we send to CallTools also goes to Caliber Leads, in parallel.
+// Per Caliber's spec the request must be HMAC-SHA256 signed over
+// `${timestamp}.${body}` using a shared secret. Secret + their Supabase anon
+// key are loaded from edge-function env (never the browser).
+const CALIBER_URL = "https://dblgxzhlxcviknamnskj.supabase.co/functions/v1/ingest/nba";
+
+async function hmacSha256Hex(secret: string, data: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(sigBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Map our 4 income buckets to Caliber's 6. Best-effort — both spans are
+// approximate so we pick the bucket that contains the midpoint of ours.
+function mapAnnualIncomeToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "under_50k": return "25_50k";   // could also be lt_25k; pick the common case
+    case "50k_75k": return "50_75k";
+    case "76k_150k": return "100_150k";  // could be 75_100k; pick higher midpoint
+    case "150k_plus": return "gt_150k";
+    default: return undefined;
+  }
+}
+
+// Our form's `employed_full_time` / `employed_part_time` need to be normalized
+// to Caliber's `full_time` / `part_time`. unemployed and retired already match.
+// `self_employed` isn't a value our form collects today.
+function mapEmploymentStatusToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "employed_full_time": return "full_time";
+    case "employed_part_time": return "part_time";
+    case "self_employed": return "self_employed";
+    case "unemployed": return "unemployed";
+    case "retired": return "retired";
+    default: return undefined;  // drop unknown values rather than 400 the request
+  }
+}
+
+// Caliber accepts only us_citizen / non_us_citizen. Our form has us_citizen,
+// non_citizen_legal, and "other" — fold the latter two into non_us_citizen.
+function mapCitizenshipToCaliber(ours: string | null | undefined): string | undefined {
+  switch ((ours || "").toLowerCase()) {
+    case "us_citizen": return "us_citizen";
+    case "non_citizen_legal": return "non_us_citizen";
+    case "other": return "non_us_citizen";
+    default: return undefined;
+  }
+}
+
+interface CaliberCallResult {
+  status: number;
+  ok: boolean;
+  body: unknown;
+  error: string | null;
+  // Mapped fields for the leads update.
+  derivedStatus: "success" | "duplicate" | "failed" | "skipped";
+  leadId: string | null;
+  action: string | null;
+}
+
+async function postToCaliber(args: {
+  phoneE164: string;
+  payload: LeadPayload;
+  clientIp: string;
+  userAgent: string;
+  refererUrl: string;
+}): Promise<CaliberCallResult> {
+  const secret = Deno.env.get("CALIBER_HMAC_SECRET") || "";
+  const anonKey = Deno.env.get("CALIBER_ANON_KEY") || "";
+  if (!secret || !anonKey) {
+    return {
+      status: 0, ok: false, body: null, error: "missing CALIBER_HMAC_SECRET or CALIBER_ANON_KEY",
+      derivedStatus: "skipped", leadId: null, action: null,
+    };
+  }
+
+  const body = {
+    consent: {
+      given: !!args.payload.tcpa_consent,
+      timestamp: new Date().toISOString(),
+      ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
+      user_agent: args.userAgent || undefined,
+      url: args.refererUrl || undefined,
+      // Caliber consent field name kept as `jornaya_leadid` per Caliber API
+      // spec (renaming on our side would break their TCPA validation). The
+      // VALUE is now the TrustedForm cert URL going forward.
+      jornaya_leadid: args.payload.trusted_form_cert_url || undefined,
+    },
+    contact: {
+      first_name: args.payload.first_name || undefined,
+      last_name: args.payload.last_name || undefined,
+      email: args.payload.email || undefined,
+      phone: args.phoneE164 || undefined,
+      state: args.payload.state || undefined,
+      zip: args.payload.zip || undefined,
+    },
+    attribution: {
+      utm_source: args.payload.utm_source || undefined,
+      utm_medium: args.payload.utm_medium || undefined,
+      utm_campaign: args.payload.utm_campaign || undefined,
+      utm_content: args.payload.utm_content || undefined,
+      utm_term: args.payload.utm_term || undefined,
+    },
+    extended: {
+      // Per Caliber: unknown FIELDS are dropped, but bad VALUES on a known
+      // enum field 400 the whole request — so we map our form values to
+      // Caliber's accepted enum values, returning undefined for anything that
+      // doesn't fit (omitted from the payload entirely).
+      date_of_birth: args.payload.dob || undefined,
+      citizenship: mapCitizenshipToCaliber(args.payload.citizenship),
+      employment_status: mapEmploymentStatusToCaliber(args.payload.employment_status),
+      annual_household_income_range: mapAnnualIncomeToCaliber(args.payload.annual_income),
+    },
+  };
+
+  const bodyStr = JSON.stringify(body);
+  const ts = new Date().toISOString();
+  const signature = "sha256=" + await hmacSha256Hex(secret, `${ts}.${bodyStr}`);
+
+  try {
+    const resp = await fetch(CALIBER_URL, {
+      method: "POST",
+      headers: {
+        "apikey": anonKey,
+        "Content-Type": "application/json",
+        "x-timestamp": ts,
+        "x-signature": signature,
+        // Stable request id keyed off transaction_id so retries within 24h are
+        // idempotent on Caliber's side.
+        "x-request-id": `nba-submit-lead-${args.payload.transaction_id}`,
+      },
+      body: bodyStr,
+    });
+    let respBody: unknown = null;
+    try { respBody = await resp.json(); } catch { /* leave null */ }
+
+    let derivedStatus: CaliberCallResult["derivedStatus"];
+    if (resp.status === 201) derivedStatus = "success";
+    else if (resp.status === 200 || resp.status === 409) derivedStatus = "duplicate";
+    else derivedStatus = "failed";
+
+    const r = (respBody || {}) as Record<string, unknown>;
+    return {
+      status: resp.status,
+      ok: resp.ok,
+      body: respBody,
+      error: null,
+      derivedStatus,
+      leadId: typeof r.lead_id === "string" ? r.lead_id : null,
+      // Caliber doesn't document a separate "action" enum but the 201 vs 200
+      // distinction maps cleanly to created vs duplicate.
+      action: derivedStatus === "success" ? "created"
+            : derivedStatus === "duplicate" ? "duplicate"
+            : null,
+    };
+  } catch (e) {
+    return {
+      status: 0, ok: false, body: null,
+      error: e instanceof Error ? e.message : String(e),
+      derivedStatus: "failed",
+      leadId: null, action: null,
+    };
+  }
+}
+
+// Server-side phone validation (NANP + assigned-area-code allowlist).
+// Mirrors the client-side check on /apply/2/step-4-contact so submissions
+// that bypass the form (direct POSTs, broken-JS browsers) are caught here
+// instead of wasting a CallTools call and triggering a Resend alert.
+// Accepts either 10 digits or 11 with a leading 1 (the E.164 formatter
+// below already handles both).
+//
+// Allowlist intentionally omits codes NANPA currently has unassigned --
+// e.g. 823, which CallTools rejected on a real submission. When CallTools
+// rejects a future area code that's still in the list, drop it here AND
+// in the matching frontend constant.
+const VALID_NANP_AREA_CODES = new Set<string>([
+  "201","202","203","204","205","206","207","208","209","210","212","213","214","215","216","217","218","219","220","223","224","225","226","228","229","231","234","235","236","239","240","242","246","248","251","252","253","254","256","257","260","262","263","264","267","268","269","270","272","274","276","279","281","283","284","289",
+  "301","302","303","304","305","306","307","308","309","310","312","313","314","315","316","317","318","319","320","321","323","324","325","326","327","329","330","331","332","334","336","337","339","340","341","343","345","346","347","350","351","352","353","354","357","360","361","363","364","365","367","368","369","380","382","385","386",
+  "401","402","403","404","405","406","407","408","409","410","412","413","414","415","416","417","418","419","423","424","425","428","430","431","432","434","435","436","437","438","440","441","442","443","445","447","448","450","457","458","463","464","468","469","470","471","472","473","474","475","478","479","480","483","484",
+  "501","502","503","504","505","506","507","508","509","510","512","513","514","515","516","517","518","519","520","521","522","525","530","531","539","540","541","551","557","559","561","562","563","564","567","570","571","573","574","575","579","580","581","584","585","586","587",
+  "601","602","603","604","605","606","607","608","609","610","612","613","614","615","616","617","618","619","620","623","626","628","630","631","636","639","641","645","646","647","649","650","651","657","659","660","661","662","667","669","670","671","672","678","680","681","682","684","689",
+  "701","702","703","704","705","706","707","708","709","712","713","714","715","716","717","718","719","720","724","725","726","727","728","729","731","732","734","737","738","740","742","743","747","754","757","758","760","762","763","765","769","770","771","772","773","774","775","776","778","779","780","781","782","783","784","785","786","787",
+  "801","802","803","804","805","806","807","808","809","810","812","813","814","815","816","817","818","819","820","825","828","830","831","832","833","838","839","840","843","844","845","847","848","849","850","854","855","856","857","858","859","860","861","862","863","864","865","866","867","868","870","872","873","876","877","878","879","888","902","903","904","905","906","907","908","909","910","912","913","914","915","916","917","918","919","920","925","928","929","930","931","934","936","937","938","939","940","941","943","945","947","948","949","951","952","954","956","959","970","971","972","973","978","979","980","983","984","985","986","989",
+]);
+
+type PhoneFailReason =
+  | "wrong_length"
+  | "nanp_violation"
+  | "all_same_digit"
+  | "bad_area_code";
+
+function validatePhone(raw: string): PhoneFailReason | null {
   const digits = (raw || "").replace(/\D/g, "");
   let canonical: string;
   if (digits.length === 10) canonical = digits;
@@ -24,6 +220,21 @@ function validatePhone(raw: string): "wrong_length" | "nanp_violation" | "all_sa
   if (canonical[0] < "2" || canonical[3] < "2") return "nanp_violation";
   // Reject all-same-digit (e.g. 2222222222, 9999999999).
   if (/^(\d)\1{9}$/.test(canonical)) return "all_same_digit";
+  // Reject NPAs not currently assigned by NANPA (e.g. 823, which CallTools
+  // also rejects). Mirrors the client-side allowlist on step-4-contact.
+  if (!VALID_NANP_AREA_CODES.has(canonical.slice(0, 3))) return "bad_area_code";
+  return null;
+}
+
+// Server-side email validation. Mirrors the client-side regex on
+// /apply/2/step-4-contact, with one extra rule (consecutive dots) that
+// caught a real CallTools rejection: "Osmolinskathy12@gmal..com is a
+// invalid email address for field email". RFC 5322 forbids consecutive
+// dots in the local part and in dot-atom domain labels.
+function validateEmail(raw: string): "invalid_email" | null {
+  const trimmed = (raw || "").trim();
+  if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(trimmed)) return "invalid_email";
+  if (trimmed.includes("..")) return "invalid_email";
   return null;
 }
 
@@ -42,7 +253,7 @@ interface LeadPayload {
   email: string;
   phone: string;
   tcpa_consent: boolean;
-  jornaya_leadid: string;
+  trusted_form_cert_url: string;
   click_id?: string;
   wbraid?: string;
   gbraid?: string;
@@ -134,6 +345,35 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // --- Email validation ---
+    // Same pattern as the phone gate: drop bad emails to bot_drops so we
+    // don't burn a CallTools call and a Resend alert on a known-bad input.
+    // Catches real CallTools rejections like "Osmolinskathy12@gmal..com".
+    const emailFailReason = validateEmail(payload.email);
+    if (emailFailReason) {
+      console.warn(`Invalid email (${emailFailReason}): IP=${clientIp}, email=${payload.email}`);
+
+      await supabase.from("bot_drops").insert({
+        ip_address: clientIp,
+        user_agent: req.headers.get("user-agent") || "unknown",
+        detection_reason: emailFailReason,
+        form_duration_ms: formDuration,
+        raw_payload: payload,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Lead submitted successfully",
+          transaction_id: payload.transaction_id,
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
@@ -152,7 +392,7 @@ Deno.serve(async (req: Request) => {
         phone: payload.phone,
         tcpa_consent: payload.tcpa_consent,
         ip_address: clientIp,
-        jornaya_leadid: payload.jornaya_leadid || "STATIC_JORNAYA_ID_PLACEHOLDER",
+        trusted_form_cert_url: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
         crm_status: "pending",
         gclid: payload.click_id || null,
         wbraid: payload.wbraid || null,
@@ -205,10 +445,12 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Fall back to wbraid/gbraid when gclid is absent so click_id is never empty
-    // for valid Google Ads clicks (iOS privacy-safe traffic).
-    const clickId = payload.click_id || payload.wbraid || payload.gbraid || "";
-
+    // gclid / gbraid / wbraid each post to their own named field on CallTools.
+    // No cross-type fallback (e.g. wbraid value into a gclid field) — that
+    // conflation was the root cause of the CallTools -> Ringba User:gclid
+    // mis-mapping we cleaned up on 2026-04-30, where gbraid-shaped values
+    // and UUIDs landed in the gclid column. Each click identifier goes only
+    // where it belongs; if it's not present we send an empty string.
     const crmBody: Record<string, unknown> = {
       transaction_id: payload.transaction_id,
       state: payload.state,
@@ -225,8 +467,11 @@ Deno.serve(async (req: Request) => {
       email: payload.email,
       home_phone_number: phoneFormatted,
       tcpa_consent: String(payload.tcpa_consent),
-      jornaya_lead_id: payload.jornaya_leadid || "STATIC_JORNAYA_ID_PLACEHOLDER",
-      click_id: clickId,
+      // Outbound CallTools field name kept as `jornaya_lead_id` because the
+      // CallTools side is configured to receive it under that name. The VALUE
+      // is now the TrustedForm cert URL going forward.
+      jornaya_lead_id: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
+      gclid: payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
       utm_source: payload.utm_source || "",
@@ -244,49 +489,66 @@ Deno.serve(async (req: Request) => {
     console.log("CRM Request URL:", crmUrl);
     console.log("CRM Request Body:", crmBody);
 
-    let crmSuccess = false;
-    let crmResponse: any = null;
-    let crmStatus = 0;
-    let crmLeadId = null;
-    let crmAction: string | null = null;
-    let errorMessage = null;
-
-    try {
-      const crmResult = await fetch(crmUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${calltoolsToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(crmBody),
-      });
-
-      crmStatus = crmResult.status;
-      console.log("CRM Response Status:", crmStatus);
-
-      crmResponse = await crmResult.json();
-      console.log("CRM Response:", crmResponse);
-      crmSuccess = crmResult.ok;
-
-      if (crmSuccess && crmResponse) {
-        // Fresh insert returns the contact object with `id`.
-        // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
-        // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
-        crmLeadId = crmResponse.id
-          ?? crmResponse.contact_id
-          ?? crmResponse.uid
-          ?? (Array.isArray(crmResponse.duplicate_contacts) ? crmResponse.duplicate_contacts[0] : null)
-          ?? null;
+    // Fire CallTools and Caliber Leads in parallel. Each has its own try/catch
+    // so one provider's failure doesn't break the other; the lead row stays
+    // accepted regardless. Total response time = max(calltools, caliber)
+    // instead of the sum.
+    const calltoolsPromise = (async () => {
+      let success = false;
+      let response: any = null;
+      let status = 0;
+      let leadId: string | null = null;
+      let action: string | null = null;
+      let error: string | null = null;
+      try {
+        const result = await fetch(crmUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Token ${calltoolsToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(crmBody),
+        });
+        status = result.status;
+        console.log("CRM Response Status:", status);
+        response = await result.json();
+        console.log("CRM Response:", response);
+        success = result.ok;
+        if (success && response) {
+          // Fresh insert returns the contact object with `id`.
+          // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
+          // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
+          leadId = response.id
+            ?? response.contact_id
+            ?? response.uid
+            ?? (Array.isArray(response.duplicate_contacts) ? response.duplicate_contacts[0] : null)
+            ?? null;
+        }
+        action = response?.duplicate_action ?? (response?.id ? "CREATE" : null);
+      } catch (e) {
+        console.error("CRM API error:", e);
+        error = e instanceof Error ? e.message : "Unknown error";
+        success = false;
       }
+      return { success, response, status, leadId, action, error };
+    })();
 
-      // Derive how CallTools handled this submission: MERGE (existing contact) or CREATE (new).
-      crmAction = crmResponse?.duplicate_action
-        ?? (crmResponse?.id ? "CREATE" : null);
-    } catch (error) {
-      console.error("CRM API error:", error);
-      errorMessage = error instanceof Error ? error.message : "Unknown error";
-      crmSuccess = false;
-    }
+    const caliberPromise = postToCaliber({
+      phoneE164: phoneFormatted,
+      payload,
+      clientIp,
+      userAgent: req.headers.get("user-agent") || "",
+      refererUrl: req.headers.get("referer") || "",
+    });
+
+    const [crmResult, caliberResult] = await Promise.all([calltoolsPromise, caliberPromise]);
+
+    const crmSuccess = crmResult.success;
+    const crmResponse = crmResult.response;
+    const crmStatus = crmResult.status;
+    const crmLeadId = crmResult.leadId;
+    const crmAction = crmResult.action;
+    const errorMessage = crmResult.error;
 
     await supabase.from("api_logs").insert({
       lead_id: leadData.id,
@@ -298,6 +560,33 @@ Deno.serve(async (req: Request) => {
       success: crmSuccess,
       error_message: errorMessage,
     });
+
+    // Separate api_logs row for Caliber so the audit trail per provider is
+    // clean and we can filter on response_payload.provider downstream.
+    await supabase.from("api_logs").insert({
+      lead_id: leadData.id,
+      transaction_id: payload.transaction_id,
+      caller_id: phoneFormatted,
+      request_payload: { provider: "caliber_leads", url: CALIBER_URL } as object,
+      response_payload: { provider: "caliber_leads", body: caliberResult.body } as object,
+      http_status: caliberResult.status,
+      success: caliberResult.ok,
+      error_message: caliberResult.error,
+    });
+
+    // Stamp Caliber result on the leads row regardless of CallTools outcome.
+    await supabase
+      .from("leads")
+      .update({
+        caliber_status: caliberResult.derivedStatus,
+        caliber_lead_id: caliberResult.leadId,
+        caliber_action: caliberResult.action,
+        caliber_submitted_at:
+          (caliberResult.derivedStatus === "success" || caliberResult.derivedStatus === "duplicate")
+            ? new Date().toISOString()
+            : null,
+      })
+      .eq("id", leadData.id);
 
     if (crmSuccess) {
       await supabase
