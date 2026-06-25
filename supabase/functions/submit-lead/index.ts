@@ -181,7 +181,7 @@ async function postToCaliber(args: {
   }
 }
 
-// Server-side phone validation (NANP + assigned-area-code allowlist).
+// Server-side phone validation (NANP + US-only area-code allowlist).
 // Mirrors the client-side check on /apply/2/step-4-contact so submissions
 // that bypass the form (direct POSTs, broken-JS browsers) are caught here
 // instead of wasting a CallTools call and triggering a Resend alert.
@@ -193,13 +193,7 @@ async function postToCaliber(args: {
 // rejects a future area code that's still in the list, drop it here AND
 // in the matching frontend constant.
 const VALID_NANP_AREA_CODES = new Set<string>([
-  "201","202","203","204","205","206","207","208","209","210","212","213","214","215","216","217","218","219","220","223","224","225","226","228","229","231","234","235","236","239","240","242","246","248","251","252","253","254","256","257","260","262","263","264","267","268","269","270","272","274","276","279","281","283","284","289",
-  "301","302","303","304","305","306","307","308","309","310","312","313","314","315","316","317","318","319","320","321","323","324","325","326","327","329","330","331","332","334","336","337","339","340","341","343","345","346","347","350","351","352","353","354","357","360","361","363","364","365","367","368","369","380","382","385","386",
-  "401","402","403","404","405","406","407","408","409","410","412","413","414","415","416","417","418","419","423","424","425","428","430","431","432","434","435","436","437","438","440","441","442","443","445","447","448","450","457","458","463","464","468","469","470","471","472","473","474","475","478","479","480","483","484",
-  "501","502","503","504","505","506","507","508","509","510","512","513","514","515","516","517","518","519","520","521","522","525","530","531","539","540","541","551","557","559","561","562","563","564","567","570","571","573","574","575","579","580","581","584","585","586","587",
-  "601","602","603","604","605","606","607","608","609","610","612","613","614","615","616","617","618","619","620","623","626","628","630","631","636","639","641","645","646","647","649","650","651","657","659","660","661","662","667","669","670","671","672","678","680","681","682","684","689",
-  "701","702","703","704","705","706","707","708","709","712","713","714","715","716","717","718","719","720","724","725","726","727","728","729","731","732","734","737","738","740","742","743","747","754","757","758","760","762","763","765","769","770","771","772","773","774","775","776","778","779","780","781","782","783","784","785","786","787",
-  "801","802","803","804","805","806","807","808","809","810","812","813","814","815","816","817","818","819","820","825","828","830","831","832","833","838","839","840","843","844","845","847","848","849","850","854","855","856","857","858","859","860","861","862","863","864","865","866","867","868","870","872","873","876","877","878","879","888","902","903","904","905","906","907","908","909","910","912","913","914","915","916","917","918","919","920","925","928","929","930","931","934","936","937","938","939","940","941","943","945","947","948","949","951","952","954","956","959","970","971","972","973","978","979","980","983","984","985","986","989",
+  "201","202","203","205","206","207","208","209","210","212","213","214","215","216","217","218","219","220","223","224","225","228","229","231","234","235","239","240","248","251","252","253","254","256","260","262","267","269","270","272","274","276","278","279","281","283","301","302","303","304","305","307","308","309","310","312","313","314","315","316","317","318","319","320","321","323","324","325","326","327","329","330","331","332","334","336","337","339","341","346","347","350","351","352","353","357","360","361","363","364","369","380","385","386","401","402","404","405","406","407","408","409","410","412","413","414","415","417","419","423","424","425","430","432","434","435","436","440","442","443","445","447","448","457","458","463","464","469","470","471","472","475","478","479","480","483","484","501","502","503","504","505","507","508","509","510","512","513","515","516","517","518","520","521","522","525","530","531","534","539","540","541","551","557","559","561","562","563","564","567","570","571","573","574","575","580","585","586","601","602","603","605","606","607","608","609","610","612","614","615","616","617","618","619","620","623","626","628","629","630","631","636","641","645","646","650","651","657","659","660","661","662","667","669","678","680","681","682","689","701","702","703","704","706","707","708","712","713","714","715","716","717","718","719","720","724","725","726","727","728","729","731","732","734","737","738","740","743","747","754","757","760","762","763","765","769","770","771","772","773","774","775","776","779","781","783","785","786","801","802","803","804","805","806","808","810","812","813","814","815","816","817","818","820","828","830","831","832","833","838","839","840","843","844","845","847","848","850","854","855","856","857","858","859","860","861","862","863","864","865","866","870","872","877","878","888","903","904","906","907","908","909","910","912","913","914","915","916","917","918","919","920","925","928","929","930","931","934","936","937","938","940","941","943","945","947","948","949","951","952","954","956","959","970","971","972","973","978","979","980","983","984","985","986","989",
 ]);
 
 type PhoneFailReason =
@@ -220,8 +214,8 @@ function validatePhone(raw: string): PhoneFailReason | null {
   if (canonical[0] < "2" || canonical[3] < "2") return "nanp_violation";
   // Reject all-same-digit (e.g. 2222222222, 9999999999).
   if (/^(\d)\1{9}$/.test(canonical)) return "all_same_digit";
-  // Reject NPAs not currently assigned by NANPA (e.g. 823, which CallTools
-  // also rejects). Mirrors the client-side allowlist on step-4-contact.
+  // Reject NPAs not in the US 50-states+DC allowlist (foreign NANP, Canada,
+  // and non-state US territories). Mirrors the client-side allowlist.
   if (!VALID_NANP_AREA_CODES.has(canonical.slice(0, 3))) return "bad_area_code";
   return null;
 }
@@ -235,6 +229,7 @@ function validateEmail(raw: string): "invalid_email" | null {
   const trimmed = (raw || "").trim();
   if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(trimmed)) return "invalid_email";
   if (trimmed.includes("..")) return "invalid_email";
+  if (trimmed.includes(".@")) return "invalid_email";
   return null;
 }
 
@@ -254,6 +249,7 @@ interface LeadPayload {
   phone: string;
   tcpa_consent: boolean;
   trusted_form_cert_url: string;
+  age?: number;
   click_id?: string;
   wbraid?: string;
   gbraid?: string;
@@ -380,6 +376,7 @@ Deno.serve(async (req: Request) => {
         transaction_id: payload.transaction_id,
         state: payload.state,
         dob: payload.dob,
+        age: (typeof payload.age === "number" ? payload.age : null),
         citizenship: payload.citizenship,
         street_address: payload.street_address,
         city: payload.city,
@@ -455,7 +452,7 @@ Deno.serve(async (req: Request) => {
       transaction_id: payload.transaction_id,
       state: payload.state,
       dob: payload.dob,
-      ...(age !== undefined && { age }),
+      ...((payload.age ?? age) !== undefined && { age: payload.age ?? age }),
       citizenship: payload.citizenship,
       address: payload.street_address,
       city: payload.city,
@@ -494,42 +491,89 @@ Deno.serve(async (req: Request) => {
     // accepted regardless. Total response time = max(calltools, caliber)
     // instead of the sum.
     const calltoolsPromise = (async () => {
+      // CallTools occasionally returns a transient HTTP 5xx with an HTML error
+      // page (its generic server-error page) instead of JSON. The old code did
+      // `await result.json()` directly, which threw "Unexpected token '<'" on
+      // that HTML and dropped an otherwise-valid lead (saved to Supabase + sent
+      // to Caliber, but never posted to CallTools). We now:
+      //   1. read the body as text first (never throws on HTML),
+      //   2. parse JSON defensively and keep the raw body for the log/alert,
+      //   3. retry transient failures (5xx / non-JSON / network timeout) up to
+      //      3x with backoff. CallTools dedupes by phone, so a retry after a
+      //      partially-applied create merges instead of creating a duplicate.
+      // 4xx (request-side) is not retried — it won't change on a retry.
       let success = false;
       let response: any = null;
       let status = 0;
       let leadId: string | null = null;
       let action: string | null = null;
       let error: string | null = null;
-      try {
-        const result = await fetch(crmUrl, {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${calltoolsToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(crmBody),
-        });
-        status = result.status;
-        console.log("CRM Response Status:", status);
-        response = await result.json();
-        console.log("CRM Response:", response);
-        success = result.ok;
-        if (success && response) {
-          // Fresh insert returns the contact object with `id`.
-          // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
-          // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
-          leadId = response.id
-            ?? response.contact_id
-            ?? response.uid
-            ?? (Array.isArray(response.duplicate_contacts) ? response.duplicate_contacts[0] : null)
-            ?? null;
+      const MAX_ATTEMPTS = 3;
+      const ATTEMPT_TIMEOUT_MS = 10000;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), ATTEMPT_TIMEOUT_MS);
+        try {
+          const result = await fetch(crmUrl, {
+            method: "POST",
+            headers: {
+              "Authorization": `Token ${calltoolsToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(crmBody),
+            signal: ac.signal,
+          });
+          status = result.status;
+          // Read as text first so a non-JSON (HTML) body never throws here.
+          const rawBody = await result.text();
+          console.log("CRM Response Status:", status, "attempt", attempt);
+          try {
+            response = rawBody ? JSON.parse(rawBody) : null;
+          } catch {
+            response = null; // non-JSON body (e.g. HTML error page)
+          }
+          console.log("CRM Response:", response);
+
+          if (result.ok) {
+            success = true;
+            // Fresh insert returns the contact object with `id`.
+            // Duplicate-merge returns { duplicate_contacts: [<id>], duplicate_action: "MERGE" }.
+            // Fall through to duplicate_contacts[0] so merged leads still record the CallTools contact.
+            leadId = response?.id
+              ?? response?.contact_id
+              ?? response?.uid
+              ?? (Array.isArray(response?.duplicate_contacts) ? response.duplicate_contacts[0] : null)
+              ?? null;
+            action = response?.duplicate_action ?? (response?.id ? "CREATE" : null);
+            error = null;
+            break;
+          }
+
+          // Non-2xx. Capture the actual body (HTML error page or JSON string)
+          // so api_logs/the alert show what CallTools really returned.
+          error = `CallTools HTTP ${status}: ${rawBody.slice(0, 300)}`;
+          // Only retry 5xx (transient server-side). 4xx is our request's fault.
+          if (status < 500) break;
+        } catch (e) {
+          // Network-level error, or our per-attempt timeout fired (AbortError).
+          console.error("CRM API error:", e);
+          error = e instanceof Error
+            ? (e.name === "AbortError"
+              ? `CallTools request timed out after ${ATTEMPT_TIMEOUT_MS}ms`
+              : e.message)
+            : "Unknown error";
+          success = false;
+        } finally {
+          clearTimeout(timer);
         }
-        action = response?.duplicate_action ?? (response?.id ? "CREATE" : null);
-      } catch (e) {
-        console.error("CRM API error:", e);
-        error = e instanceof Error ? e.message : "Unknown error";
-        success = false;
+
+        // Back off before the next attempt (400ms, then 800ms).
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+        }
       }
+
       return { success, response, status, leadId, action, error };
     })();
 
