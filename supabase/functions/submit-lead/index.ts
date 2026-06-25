@@ -230,6 +230,7 @@ function validateEmail(raw: string): "invalid_email" | null {
   if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(trimmed)) return "invalid_email";
   if (trimmed.includes("..")) return "invalid_email";
   if (trimmed.includes(".@")) return "invalid_email";
+  if (trimmed.includes("@.")) return "invalid_email";
   return null;
 }
 
