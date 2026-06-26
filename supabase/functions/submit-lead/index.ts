@@ -371,10 +371,17 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Guarantee a non-empty transaction_id — our key identifier. The front end
+    // normally supplies one; this covers the rare blank so neither the leads row
+    // nor the CallTools/Caliber posts can ever go out without it.
+    const transactionId = (typeof payload.transaction_id === "string" && payload.transaction_id.trim())
+      ? payload.transaction_id.trim()
+      : crypto.randomUUID();
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
-        transaction_id: payload.transaction_id,
+        transaction_id: transactionId,
         state: payload.state,
         dob: payload.dob,
         age: (typeof payload.age === "number" ? payload.age : null),
@@ -450,7 +457,7 @@ Deno.serve(async (req: Request) => {
     // and UUIDs landed in the gclid column. Each click identifier goes only
     // where it belongs; if it's not present we send an empty string.
     const crmBody: Record<string, unknown> = {
-      transaction_id: payload.transaction_id,
+      transaction_id: transactionId,
       state: payload.state,
       dob: payload.dob,
       ...((payload.age ?? age) !== undefined && { age: payload.age ?? age }),
@@ -468,7 +475,7 @@ Deno.serve(async (req: Request) => {
       // Outbound CallTools field name kept as `jornaya_lead_id` because the
       // CallTools side is configured to receive it under that name. The VALUE
       // is now the TrustedForm cert URL going forward.
-      jornaya_lead_id: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
+      jornaya_lead_id: payload.trusted_form_cert_url || "",
       gclid: payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
@@ -481,6 +488,17 @@ Deno.serve(async (req: Request) => {
       do_not_contact: false,
       add_tags: [268591],
     };
+
+    // Don't send empty values to CallTools. Duplicate mode is Overwrite (match by
+    // phone), so a blank field would clobber whatever the existing contact already
+    // has (e.g. wipe a real gclid with ""). Omitting the field instead leaves the
+    // existing value untouched. Keeps false / 0 / arrays; drops null/undefined/"".
+    for (const k of Object.keys(crmBody)) {
+      const v = crmBody[k];
+      if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) {
+        delete crmBody[k];
+      }
+    }
 
     const crmUrl = "https://app.calltools.io/api/contacts/";
 
@@ -597,7 +615,7 @@ Deno.serve(async (req: Request) => {
 
     await supabase.from("api_logs").insert({
       lead_id: leadData.id,
-      transaction_id: payload.transaction_id,
+      transaction_id: transactionId,
       caller_id: phoneFormatted,
       request_payload: crmBody,
       response_payload: crmResponse,
@@ -610,7 +628,7 @@ Deno.serve(async (req: Request) => {
     // clean and we can filter on response_payload.provider downstream.
     await supabase.from("api_logs").insert({
       lead_id: leadData.id,
-      transaction_id: payload.transaction_id,
+      transaction_id: transactionId,
       caller_id: phoneFormatted,
       request_payload: { provider: "caliber_leads", url: CALIBER_URL } as object,
       response_payload: { provider: "caliber_leads", body: caliberResult.body } as object,
