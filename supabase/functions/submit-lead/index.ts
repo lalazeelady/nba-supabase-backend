@@ -74,6 +74,10 @@ interface CaliberCallResult {
   derivedStatus: "success" | "duplicate" | "failed" | "skipped";
   leadId: string | null;
   action: string | null;
+  // The exact JSON body we POSTed to Caliber, so api_logs can record what we
+  // actually sent (field names + values). Null when the request was skipped
+  // before the body was built. Excludes the HMAC signature/secret.
+  requestBody: unknown;
 }
 
 async function postToCaliber(args: {
@@ -88,7 +92,7 @@ async function postToCaliber(args: {
   if (!secret || !anonKey) {
     return {
       status: 0, ok: false, body: null, error: "missing CALIBER_HMAC_SECRET or CALIBER_ANON_KEY",
-      derivedStatus: "skipped", leadId: null, action: null,
+      derivedStatus: "skipped", leadId: null, action: null, requestBody: null,
     };
   }
 
@@ -109,6 +113,12 @@ async function postToCaliber(args: {
       last_name: args.payload.last_name || undefined,
       email: args.payload.email || undefined,
       phone: args.phoneE164 || undefined,
+      // Street line + city. These are free-text (not enums), so per Caliber's
+      // rule an unrecognized field name is silently dropped rather than 400ing
+      // the request — safe to send. Field names `address`/`city` mirror what we
+      // send CallTools; confirm against Caliber's ingest spec that they land.
+      address: args.payload.street_address || undefined,
+      city: args.payload.city || undefined,
       state: args.payload.state || undefined,
       zip: args.payload.zip || undefined,
     },
@@ -170,13 +180,14 @@ async function postToCaliber(args: {
       action: derivedStatus === "success" ? "created"
             : derivedStatus === "duplicate" ? "duplicate"
             : null,
+      requestBody: body,
     };
   } catch (e) {
     return {
       status: 0, ok: false, body: null,
       error: e instanceof Error ? e.message : String(e),
       derivedStatus: "failed",
-      leadId: null, action: null,
+      leadId: null, action: null, requestBody: body,
     };
   }
 }
@@ -630,7 +641,7 @@ Deno.serve(async (req: Request) => {
       lead_id: leadData.id,
       transaction_id: transactionId,
       caller_id: phoneFormatted,
-      request_payload: { provider: "caliber_leads", url: CALIBER_URL } as object,
+      request_payload: { provider: "caliber_leads", url: CALIBER_URL, body: caliberResult.requestBody } as object,
       response_payload: { provider: "caliber_leads", body: caliberResult.body } as object,
       http_status: caliberResult.status,
       success: caliberResult.ok,
