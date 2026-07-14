@@ -93,6 +93,15 @@ const FIELD_VARIANTS = {
     "publisher", "Publisher", "publisher_name", "publisherName",
     "tag:Publisher:Name", "tag:Publisher:name",
   ],
+  // UTM parameters, if CallTools/Ringba forwards them on the transfer. Stored
+  // for attribution/reporting completeness; not used for the Google upload
+  // (that attributes on click IDs). Missing values are backfilled from the
+  // matched lead below.
+  utm_source: ["utm_source", "utmSource", "utm_src"],
+  utm_medium: ["utm_medium", "utmMedium", "utm_med"],
+  utm_campaign: ["utm_campaign", "utmCampaign", "utm_camp"],
+  utm_content: ["utm_content", "utmContent"],
+  utm_term: ["utm_term", "utmTerm"],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -171,6 +180,19 @@ interface MatchResult {
   lead_id: string | null;
   matched_by: string | null;
 }
+
+// Attribution columns pulled from a matched lead to backfill a Ringba event.
+type LeadAttr = {
+  transaction_id: string | null;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_content: string | null;
+  utm_term: string | null;
+};
 
 async function matchLead(
   supabase: ReturnType<typeof createClient>,
@@ -320,6 +342,11 @@ Deno.serve(async (req: Request) => {
   const caller_zip = pick(merged, FIELD_VARIANTS.caller_zip);
   const caller_state = pick(merged, FIELD_VARIANTS.caller_state);
   const publisher = pick(merged, FIELD_VARIANTS.publisher);
+  const utm_source = pick(merged, FIELD_VARIANTS.utm_source);
+  const utm_medium = pick(merged, FIELD_VARIANTS.utm_medium);
+  const utm_campaign = pick(merged, FIELD_VARIANTS.utm_campaign);
+  const utm_content = pick(merged, FIELD_VARIANTS.utm_content);
+  const utm_term = pick(merged, FIELD_VARIANTS.utm_term);
 
   // Ingress filter: only NBA-publisher postbacks become rows.
   // Other publishers' postbacks are logged for audit then dropped — we don't
@@ -360,7 +387,33 @@ Deno.serve(async (req: Request) => {
     caller_id,
   });
 
-  const hasClickId = Boolean(gclid || gbraid || wbraid);
+  // Backfill attribution from the matched lead at ingestion time. Ringba often
+  // can't forward the transaction_id/UTMs (e.g. direct-dial callers whose lead
+  // was created by the form, or transfers that drop the tags). When we've
+  // matched a lead, prefer the postback value but fall back to the lead's, so
+  // the stored event carries full attribution instead of a bare caller_id.
+  let leadAttr: LeadAttr | null = null;
+  if (match.lead_id) {
+    const { data } = await supabase
+      .from("leads")
+      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+      .eq("id", match.lead_id)
+      .maybeSingle();
+    leadAttr = (data as unknown as LeadAttr) ?? null;
+  }
+  const nz = (v: string | null | undefined): string | null =>
+    (v !== undefined && v !== null && String(v).trim() !== "") ? String(v) : null;
+  const eff_transaction_id = nz(transaction_id) ?? nz(leadAttr?.transaction_id) ?? null;
+  const eff_gclid = nz(gclid) ?? nz(leadAttr?.gclid) ?? null;
+  const eff_gbraid = nz(gbraid) ?? nz(leadAttr?.gbraid) ?? null;
+  const eff_wbraid = nz(wbraid) ?? nz(leadAttr?.wbraid) ?? null;
+  const eff_utm_source = nz(utm_source) ?? nz(leadAttr?.utm_source) ?? null;
+  const eff_utm_medium = nz(utm_medium) ?? nz(leadAttr?.utm_medium) ?? null;
+  const eff_utm_campaign = nz(utm_campaign) ?? nz(leadAttr?.utm_campaign) ?? null;
+  const eff_utm_content = nz(utm_content) ?? nz(leadAttr?.utm_content) ?? null;
+  const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
+
+  const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
   // ECL-eligible: we have either matched a lead (so the uploader will pull
   // full PII via JOIN) or Ringba forwarded enough postback PII to send
   // hashed userIdentifiers. Phone alone (caller_id) is enough — Google's
@@ -399,13 +452,13 @@ Deno.serve(async (req: Request) => {
         event_type: EVENT_TYPE,
         status,
         lead_id: match.lead_id,
-        transaction_id,
+        transaction_id: eff_transaction_id,
         ringba_call_id,
         calltools_call_id,
         caller_id,
-        gclid,
-        gbraid,
-        wbraid,
+        gclid: eff_gclid,
+        gbraid: eff_gbraid,
+        wbraid: eff_wbraid,
         conversion_time: conversion_time.toISOString(),
         conversion_value,
         currency_code,
@@ -415,6 +468,11 @@ Deno.serve(async (req: Request) => {
         caller_zip,
         caller_state,
         publisher,
+        utm_source: eff_utm_source,
+        utm_medium: eff_utm_medium,
+        utm_campaign: eff_utm_campaign,
+        utm_content: eff_utm_content,
+        utm_term: eff_utm_term,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
         google_ads_conversion_action_id:
           Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE") || null,
