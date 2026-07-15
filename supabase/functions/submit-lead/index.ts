@@ -320,6 +320,7 @@ Deno.serve(async (req: Request) => {
           success: true,
           message: "Lead submitted successfully",
           transaction_id: payload.transaction_id,
+          crm_accepted: false,
         }),
         {
           status: 200,
@@ -350,6 +351,7 @@ Deno.serve(async (req: Request) => {
           success: true,
           message: "Lead submitted successfully",
           transaction_id: payload.transaction_id,
+          crm_accepted: false,
         }),
         {
           status: 200,
@@ -379,6 +381,7 @@ Deno.serve(async (req: Request) => {
           success: true,
           message: "Lead submitted successfully",
           transaction_id: payload.transaction_id,
+          crm_accepted: false,
         }),
         {
           status: 200,
@@ -742,6 +745,9 @@ Deno.serve(async (req: Request) => {
         success: true,
         message: "Lead submitted successfully",
         transaction_id: payload.transaction_id,
+        // Truthful CallTools-acceptance signal for the funnel: only accepted
+        // leads are routed to the completed-funnel thank-you number.
+        crm_accepted: crmSuccess,
       }),
       {
         status: 200,
