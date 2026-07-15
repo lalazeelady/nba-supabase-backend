@@ -280,12 +280,17 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  try {
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
-    );
+  // Client + a handle to the inserted lead are declared outside the try so the
+  // catch can flag a lead that was saved but then hit an exception before its
+  // CRM status was resolved — otherwise it would sit at 'pending' forever
+  // (invisible attribution: saved to Supabase, never posted to CallTools).
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL") ?? "",
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+  );
+  let insertedLeadId: string | null = null;
 
+  try {
     const payload: LeadPayload = await req.json();
 
     const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
@@ -389,13 +394,30 @@ Deno.serve(async (req: Request) => {
       ? payload.transaction_id.trim()
       : crypto.randomUUID();
 
+    // Derive age from DOB once, up front, so it can be persisted on the leads
+    // row (previously left null — leads.age was ~99% null) AND reused for the
+    // CallTools payload. Front end may also supply an explicit age; prefer it.
+    let computedAge: number | undefined;
+    {
+      const dobDate = new Date(payload.dob);
+      if (!isNaN(dobDate.getTime())) {
+        const today = new Date();
+        computedAge = today.getFullYear() - dobDate.getFullYear();
+        const monthDiff = today.getMonth() - dobDate.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dobDate.getDate())) {
+          computedAge--;
+        }
+      }
+    }
+    const ageToStore = (typeof payload.age === "number" ? payload.age : computedAge) ?? null;
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
         transaction_id: transactionId,
         state: payload.state,
         dob: payload.dob,
-        age: (typeof payload.age === "number" ? payload.age : null),
+        age: ageToStore,
         citizenship: payload.citizenship,
         street_address: payload.street_address,
         city: payload.city,
@@ -433,6 +455,10 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Track the saved lead so the catch can move it off 'pending' if anything
+    // downstream throws (e.g. a missing CRM token).
+    insertedLeadId = leadData.id as string;
+
     const calltoolsToken = Deno.env.get("CALLTOOLS_API_TOKEN");
     if (!calltoolsToken) {
       throw new Error("CALLTOOLS_API_TOKEN is not set");
@@ -450,17 +476,6 @@ Deno.serve(async (req: Request) => {
       phoneFormatted = "";
     }
 
-    let age: number | undefined;
-    const dobDate = new Date(payload.dob);
-    if (!isNaN(dobDate.getTime())) {
-      const today = new Date();
-      age = today.getFullYear() - dobDate.getFullYear();
-      const monthDiff = today.getMonth() - dobDate.getMonth();
-      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dobDate.getDate())) {
-        age--;
-      }
-    }
-
     // gclid / gbraid / wbraid each post to their own named field on CallTools.
     // No cross-type fallback (e.g. wbraid value into a gclid field) — that
     // conflation was the root cause of the CallTools -> Ringba User:gclid
@@ -471,7 +486,7 @@ Deno.serve(async (req: Request) => {
       transaction_id: transactionId,
       state: payload.state,
       dob: payload.dob,
-      ...((payload.age ?? age) !== undefined && { age: payload.age ?? age }),
+      ...((payload.age ?? computedAge) !== undefined && { age: payload.age ?? computedAge }),
       citizenship: payload.citizenship,
       address: payload.street_address,
       city: payload.city,
@@ -642,9 +657,13 @@ Deno.serve(async (req: Request) => {
       transaction_id: transactionId,
       caller_id: phoneFormatted,
       request_payload: { provider: "caliber_leads", url: CALIBER_URL, body: caliberResult.requestBody } as object,
-      response_payload: { provider: "caliber_leads", body: caliberResult.body } as object,
+      response_payload: { provider: "caliber_leads", body: caliberResult.body, derived_status: caliberResult.derivedStatus } as object,
       http_status: caliberResult.status,
-      success: caliberResult.ok,
+      // A duplicate (HTTP 409 duplicate_rejected, or 200) is a SUCCESSFUL
+      // dedupe on Caliber's side, not a failure. Log success on both accepted
+      // and duplicate so failure reporting off api_logs.success stops
+      // overcounting Caliber "failures" (was ~6.8k mislabeled 409s).
+      success: caliberResult.derivedStatus === "success" || caliberResult.derivedStatus === "duplicate",
       error_message: caliberResult.error,
     });
 
@@ -731,6 +750,24 @@ Deno.serve(async (req: Request) => {
     );
   } catch (error) {
     console.error("Function error:", error);
+
+    // If the lead was already saved, don't leave it stranded at 'pending' —
+    // mark it 'failed' so it's queryable as a submission that never completed
+    // its CRM dispatch. Best-effort; never let this throw over the response.
+    if (insertedLeadId) {
+      try {
+        await supabase
+          .from("leads")
+          .update({
+            crm_status: "failed",
+            crm_error: error instanceof Error ? error.message : String(error),
+          })
+          .eq("id", insertedLeadId);
+      } catch (flagErr) {
+        console.error("Failed to flag stranded lead:", flagErr);
+      }
+    }
+
     return new Response(
       JSON.stringify({ error: "Internal server error" }),
       {
