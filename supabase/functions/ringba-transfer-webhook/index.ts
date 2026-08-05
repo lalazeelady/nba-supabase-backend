@@ -22,15 +22,14 @@
 //     ride the Google Sheet path ONLY (v_google_sheet_export_unsynced, which
 //     was extended to emit $0 call_transferred rows).
 //
-// De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
-// 'ringba:call_transferred:<phone_last10>:<ET-date>', so all same-day repeat
-// transfers from the same number — agent double-presses AND callbacks —
-// collapse into a single conversion (existing upsert-ignoreDuplicates makes the
-// repeats no-ops). Falls back to '<ringba_call_id>' then '<click>:<time>' when
-// no caller phone is present. Namespaced by event_type, so this is fully
-// independent of the REVENUE event (ringba:call_converted_revenue:<call_id>,
-// separate webhook, separate Google action) — collapsing transfers never
-// affects which monetized call is counted.
+// De-dup: upload EVERY transfer. dedupe_key is
+// 'ringba:call_transferred:<ringba_call_id>', so each distinct transferred call
+// becomes its own CallXfer row and uploads; only an exact re-fire of the SAME
+// call id is a no-op (and Google de-dupes those by Order ID too). Falls back to
+// '<phone|click>:<full-timestamp>' when no call id is present (rare), kept
+// maximally unique so distinct calls never collapse. Namespaced by event_type,
+// so this is fully independent of the REVENUE event
+// (ringba:call_converted_revenue:<call_id>, separate webhook, separate action).
 //
 // Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
 // compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
@@ -126,17 +125,9 @@ function phoneLast10(raw: string | null): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-// Eastern-Time calendar date (YYYY-MM-DD) of a timestamp — the business day the
-// call center thinks in, matching the Order-ID date+phone convention.
-function etDate(d: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(d);
-}
-
-// dedupe_key: ONE CallXfer per caller per ET-day. Prefer phone+date so same-day
-// repeats collapse; fall back to call id, then click:time, when no phone.
+// dedupe_key: upload EVERY distinct transfer — key on the call's own id, so only
+// an exact re-fire of the same call collapses. Fall back to phone|click + full
+// timestamp (maximally unique) when no call id is present (rare).
 function buildDedupeKey(args: {
   caller_id: string | null;
   ringba_call_id: string | null;
@@ -145,15 +136,11 @@ function buildDedupeKey(args: {
   wbraid: string | null;
   conversion_time: Date;
 }): string {
-  const p = phoneLast10(args.caller_id);
-  if (p) {
-    return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
-  }
   if (args.ringba_call_id) {
     return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
   }
-  const click = args.gclid || args.gbraid || args.wbraid || "no_click";
-  return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
+  const who = phoneLast10(args.caller_id) || args.gclid || args.gbraid || args.wbraid || "no_id";
+  return `${SOURCE}:${EVENT_TYPE}:${who}:${args.conversion_time.toISOString()}`;
 }
 
 function normalizePhone(raw: string | null): string | null {

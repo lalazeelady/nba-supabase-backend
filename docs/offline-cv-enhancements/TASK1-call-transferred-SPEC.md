@@ -70,19 +70,19 @@ A trimmed copy of the revenue webhook's defensive parser, but:
 - Writes to the **same** `offline_conversion_events` table (event_type keeps rows distinct).
 - Reuses the existing `RINGBA_WEBHOOK_SECRET` (no new secret) unless you'd prefer a separate one.
 
-### D. De-dup — ONE CallXfer per caller per ET-day (locked)
-- Key `ringba:call_transferred:<phone_last10>:<ET-date>` → all same-day repeat transfers from one
-  number (agent double-presses **and** callbacks) collapse into a single conversion via the existing
-  upsert-ignoreDuplicates. A next-day callback counts fresh.
-- Ringba fires **every** transfer (on Incoming); the de-dup happens in Supabase, so no Ringba-side
-  filtering is needed and the policy is tunable without touching Ringba.
-- Fallback when no caller phone: `<ringba_call_id>`, then `<click>:<time>`.
-- **Independent of revenue:** the monetized event flows through the separate revenue webhook keyed on
-  its own `ringba_call_id` (`ringba:call_converted_revenue:<id>`, action `CallConvertOffline`).
-  Collapsing transfers never affects which monetized call is counted — they're different actions with
-  different Order IDs; Google de-dupes within each action separately.
-- Known minor edge: a caller who monetizes twice in one day → CallXfer=1 but Revenue=2 for that
-  caller. Harmless (independent actions); negligible in aggregate.
+### D. De-dup — UPLOAD EVERY TRANSFER, keyed on call id (updated 2026-08-04)
+- Key `ringba:call_transferred:<ringba_call_id>` → **every distinct transferred call becomes its own
+  CallXfer row and uploads.** Only an exact re-fire of the *same* call id is a no-op; and even if one
+  slipped through, Google de-dupes it by Order ID (= that call id). Fallback when no call id:
+  `<phone|click>:<full-timestamp>` (maximally unique so distinct calls never collapse).
+- Supersedes the earlier one-per-caller-per-ET-day rule (owner needed all transfers uploaded, not the
+  collapsed set). Both the webhook (`buildDedupeKey`) and the internet trigger
+  (`derive_internet_transfer_event`, migration `20260804140000`) key on call id.
+- **Backfill (2026-08-04):** the ~87 Ringba + ~71 internet transfers previously collapsed were
+  recovered from `api_logs` / re-derived (call-id keyed, `ON CONFLICT DO NOTHING`) — no existing row
+  touched; Google's Order-ID de-dup covers any edge-case duplicate.
+- **Independent of revenue:** the monetized event flows through the separate revenue webhook
+  (`ringba:call_converted_revenue:<id>`, action `CallConvertOffline`), unaffected.
 
 ### D2. Playbook carve-outs to document post-launch (per FUNNEL-PLAYBOOK.md)
 When live, update the playbook:
