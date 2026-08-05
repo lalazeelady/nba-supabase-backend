@@ -1,0 +1,490 @@
+// ringba-transfer-webhook
+//
+// Receives "call transferred" postbacks from Ringba — fired on the Ringba
+// "Incoming" event, i.e. the moment a CallTools agent transfers a qualified
+// call into Ringba (before/regardless of a buyer answering). Stores each as a
+// $0, count-only offline-conversion event in public.offline_conversion_events
+// with event_type='call_transferred', for upload to the Google Ads "CallXfer"
+// conversion action via the Google Sheet path.
+//
+// This is a DEDICATED sibling of ringba-conversion-webhook (the revenue
+// webhook). It deliberately does NOT touch that function so the revenue path
+// carries zero risk. The two share nothing at runtime; the parser here is a
+// trimmed copy on purpose (functions deploy as single self-contained files).
+//
+// Key differences vs. the revenue webhook:
+//   - event_type       = 'call_transferred'  (revenue: 'call_converted_revenue')
+//   - conversion_value = 0, always forced     (transfers are a count signal)
+//   - conversion_name  = 'CallXfer'
+//   - status           = 'transfer_ready' | 'transfer_unmatched'  — NEVER
+//     'ready_to_upload', so the Data-Manager API uploader
+//     (upload-google-offline-conversions) ignores transfers entirely. Transfers
+//     ride the Google Sheet path ONLY (v_google_sheet_export_unsynced, which
+//     was extended to emit $0 call_transferred rows).
+//
+// De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
+// 'ringba:call_transferred:<phone_last10>:<ET-date>', so all same-day repeat
+// transfers from the same number — agent double-presses AND callbacks —
+// collapse into a single conversion (existing upsert-ignoreDuplicates makes the
+// repeats no-ops). Falls back to '<ringba_call_id>' then '<click>:<time>' when
+// no caller phone is present. Namespaced by event_type, so this is fully
+// independent of the REVENUE event (ringba:call_converted_revenue:<call_id>,
+// separate webhook, separate Google action) — collapsing transfers never
+// affects which monetized call is counted.
+//
+// Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
+// compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
+
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Client-Info, Apikey, x-webhook-secret, x-invoke-secret",
+};
+
+const SOURCE = "ringba";
+const EVENT_TYPE = "call_transferred";
+const CONVERSION_NAME = "CallXfer";
+
+// Field-name variants we accept from Ringba. First non-empty value wins.
+// Mirrors the revenue webhook so the same Ringba token template works here
+// (minus conversion_value, which is forced to 0).
+const FIELD_VARIANTS = {
+  ringba_call_id: [
+    "ringba_call_id", "call_id", "callId", "callid",
+    "inboundCallId", "inbound_call_id", "uuid",
+  ],
+  calltools_call_id: [
+    "calltools_call_id", "ct_call_id", "source_call_id",
+  ],
+  caller_id: [
+    "caller_id", "callerId", "callerid", "caller",
+    "from_number", "fromNumber", "ani",
+  ],
+  gclid: ["gclid", "gclID", "gcl_id", "google_click_id", "googleClickId"],
+  gbraid: ["gbraid", "gbraID", "gbraid_id"],
+  wbraid: ["wbraid", "wbraID", "wbraid_id"],
+  transaction_id: [
+    "transaction_id", "transactionId", "lead_transaction_id", "txn_id", "txnId",
+  ],
+  lead_id: [
+    "lead_id", "leadId", "leadid", "supabase_lead_id", "nba_lead_id",
+  ],
+  conversion_time: [
+    "conversion_time", "conversionTime", "converted_at", "convertedAt",
+    "call_end_time", "callEndTime", "end_time", "endTime",
+    "connect_time", "connectTime", "answer_time", "answerTime",
+    "timestamp", "ts",
+  ],
+  currency_code: ["currency_code", "currencyCode", "currency"],
+  caller_email: [
+    "email", "callerEmail", "caller_email", "user_email", "userEmail",
+  ],
+  caller_first_name: ["first_name", "firstName", "fname", "first"],
+  caller_last_name: ["last_name", "lastName", "lname", "last"],
+  caller_zip: ["zip", "zip_code", "zipCode", "postal_code", "postalCode"],
+  caller_state: ["state", "region", "regionCode", "region_code"],
+  publisher: [
+    "pub", "Pub",
+    "publisher", "Publisher", "publisher_name", "publisherName",
+    "tag:Publisher:Name", "tag:Publisher:name",
+  ],
+  utm_source: ["utm_source", "utmSource", "utm_src"],
+  utm_medium: ["utm_medium", "utmMedium", "utm_med"],
+  utm_campaign: ["utm_campaign", "utmCampaign", "utm_camp"],
+  utm_content: ["utm_content", "utmContent"],
+  utm_term: ["utm_term", "utmTerm"],
+} as const;
+
+function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const k of keys) {
+    const v = obj[k];
+    if (v !== undefined && v !== null && String(v).length > 0) return String(v);
+  }
+  return null;
+}
+
+function parseTimestamp(s: string | null): Date | null {
+  if (!s) return null;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    const ms = s.length <= 10 ? n * 1000 : n;
+    const d = new Date(ms);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Last 10 digits of a phone, or null if fewer than 10 digits are present.
+function phoneLast10(raw: string | null): string | null {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+// Eastern-Time calendar date (YYYY-MM-DD) of a timestamp — the business day the
+// call center thinks in, matching the Order-ID date+phone convention.
+function etDate(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
+
+// dedupe_key: ONE CallXfer per caller per ET-day. Prefer phone+date so same-day
+// repeats collapse; fall back to call id, then click:time, when no phone.
+function buildDedupeKey(args: {
+  caller_id: string | null;
+  ringba_call_id: string | null;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
+  conversion_time: Date;
+}): string {
+  const p = phoneLast10(args.caller_id);
+  if (p) {
+    return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
+  }
+  if (args.ringba_call_id) {
+    return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
+  }
+  const click = args.gclid || args.gbraid || args.wbraid || "no_click";
+  return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
+}
+
+function normalizePhone(raw: string | null): string | null {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (digits.length > 0) return `+${digits}`;
+  return null;
+}
+
+interface MatchResult {
+  lead_id: string | null;
+  matched_by: string | null;
+}
+
+type LeadAttr = {
+  transaction_id: string | null;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_content: string | null;
+  utm_term: string | null;
+};
+
+async function matchLead(
+  supabase: ReturnType<typeof createClient>,
+  fields: {
+    lead_id: string | null;
+    transaction_id: string | null;
+    gclid: string | null;
+    gbraid: string | null;
+    wbraid: string | null;
+    caller_id: string | null;
+  },
+): Promise<MatchResult> {
+  if (fields.lead_id) {
+    const { data } = await supabase
+      .from("leads").select("id").eq("id", fields.lead_id).maybeSingle();
+    if (data?.id) return { lead_id: data.id as string, matched_by: "lead_id" };
+  }
+
+  if (fields.transaction_id) {
+    const { data } = await supabase
+      .from("leads").select("id").eq("transaction_id", fields.transaction_id).maybeSingle();
+    if (data?.id) return { lead_id: data.id as string, matched_by: "transaction_id" };
+  }
+
+  for (const [col, val] of [
+    ["gclid", fields.gclid],
+    ["gbraid", fields.gbraid],
+    ["wbraid", fields.wbraid],
+  ] as const) {
+    if (!val) continue;
+    const { data } = await supabase
+      .from("leads").select("id").eq(col, val)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (data?.id) return { lead_id: data.id as string, matched_by: col };
+  }
+
+  if (fields.caller_id) {
+    const e164 = normalizePhone(fields.caller_id);
+    if (e164) {
+      const tenDigits = e164.replace(/^\+1/, "");
+      const { data } = await supabase
+        .from("leads").select("id, phone").ilike("phone", `%${tenDigits}%`)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (data?.id) return { lead_id: data.id as string, matched_by: "caller_id" };
+    }
+  }
+
+  return { lead_id: null, matched_by: null };
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  if (req.method !== "POST" && req.method !== "GET") {
+    return new Response(
+      JSON.stringify({ error: "Method not allowed" }),
+      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const expectedSecret = Deno.env.get("RINGBA_WEBHOOK_SECRET") || "";
+  const url = new URL(req.url);
+  const providedSecret =
+    req.headers.get("x-webhook-secret") || url.searchParams.get("secret") || "";
+
+  if (!expectedSecret || providedSecret !== expectedSecret) {
+    return new Response(
+      JSON.stringify({ error: "Unauthorized" }),
+      { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL") ?? "",
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+  );
+
+  // Ringba GET pixels send everything in the query string; accept POST bodies
+  // too (JSON or form) for flexibility. Body wins over query on conflict.
+  const queryPayload = Object.fromEntries(url.searchParams.entries());
+  let bodyPayload: Record<string, unknown> = {};
+  if (req.method === "POST") {
+    const contentType = (req.headers.get("content-type") || "").toLowerCase();
+    try {
+      if (contentType.includes("application/json")) {
+        bodyPayload = await req.json();
+      } else if (contentType.includes("application/x-www-form-urlencoded")) {
+        bodyPayload = Object.fromEntries(new URLSearchParams(await req.text()));
+      } else {
+        const text = await req.text();
+        try { bodyPayload = JSON.parse(text); }
+        catch { bodyPayload = Object.fromEntries(new URLSearchParams(text)); }
+      }
+    } catch { bodyPayload = {}; }
+  }
+  const rawPayload = { ...queryPayload, ...bodyPayload };
+  const flat = rawPayload as Record<string, unknown>;
+
+  const merged: Record<string, unknown> = { ...flat };
+  for (const k of ["tag", "tags", "data", "call", "event"]) {
+    const v = flat[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      Object.assign(merged, v as Record<string, unknown>);
+    }
+  }
+
+  const ringba_call_id = pick(merged, FIELD_VARIANTS.ringba_call_id);
+  const calltools_call_id = pick(merged, FIELD_VARIANTS.calltools_call_id);
+  const caller_id = pick(merged, FIELD_VARIANTS.caller_id);
+  const gclid = pick(merged, FIELD_VARIANTS.gclid);
+  const gbraid = pick(merged, FIELD_VARIANTS.gbraid);
+  const wbraid = pick(merged, FIELD_VARIANTS.wbraid);
+  const transaction_id = pick(merged, FIELD_VARIANTS.transaction_id);
+  const claimed_lead_id = pick(merged, FIELD_VARIANTS.lead_id);
+  const parsedConvTime = parseTimestamp(pick(merged, FIELD_VARIANTS.conversion_time));
+  const conversion_time =
+    parsedConvTime && parsedConvTime.getUTCFullYear() >= 2024
+      ? parsedConvTime
+      : new Date();
+  const currency_code = (pick(merged, FIELD_VARIANTS.currency_code) || "USD").toUpperCase();
+  const caller_email = pick(merged, FIELD_VARIANTS.caller_email);
+  const caller_first_name = pick(merged, FIELD_VARIANTS.caller_first_name);
+  const caller_last_name = pick(merged, FIELD_VARIANTS.caller_last_name);
+  const caller_zip = pick(merged, FIELD_VARIANTS.caller_zip);
+  const caller_state = pick(merged, FIELD_VARIANTS.caller_state);
+  const publisher = pick(merged, FIELD_VARIANTS.publisher);
+  const utm_source = pick(merged, FIELD_VARIANTS.utm_source);
+  const utm_medium = pick(merged, FIELD_VARIANTS.utm_medium);
+  const utm_campaign = pick(merged, FIELD_VARIANTS.utm_campaign);
+  const utm_content = pick(merged, FIELD_VARIANTS.utm_content);
+  const utm_term = pick(merged, FIELD_VARIANTS.utm_term);
+
+  // Transfers are a count signal: value is ALWAYS $0, regardless of any
+  // conversion_value the pixel might carry.
+  const conversion_value = 0;
+
+  // Ingress filter: only NBA-publisher transfers become rows (parity with the
+  // revenue webhook). Log-and-drop others; return 200 so Ringba won't retry.
+  if ((publisher || "").trim().toUpperCase() !== "NBA") {
+    await supabase.from("api_logs").insert({
+      lead_id: null,
+      transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+      caller_id: caller_id || "",
+      request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
+      response_payload: {
+        skipped: true, reason: "non-nba-publisher", publisher: publisher || null,
+      } as object,
+      http_status: 200,
+      success: true,
+      error_message: null,
+    });
+    return new Response(
+      JSON.stringify({ ok: true, stored: false, skipped: "non-nba-publisher" }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const dedupe_key = buildDedupeKey({
+    caller_id, ringba_call_id, gclid, gbraid, wbraid, conversion_time,
+  });
+
+  const match = await matchLead(supabase, {
+    lead_id: claimed_lead_id, transaction_id, gclid, gbraid, wbraid, caller_id,
+  });
+
+  // Backfill attribution from a matched lead (transfers often can't forward
+  // the transaction_id/UTMs). Prefer the postback value, fall back to lead's.
+  let leadAttr: LeadAttr | null = null;
+  if (match.lead_id) {
+    const { data } = await supabase
+      .from("leads")
+      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+      .eq("id", match.lead_id)
+      .maybeSingle();
+    leadAttr = (data as unknown as LeadAttr) ?? null;
+  }
+  const nz = (v: string | null | undefined): string | null =>
+    (v !== undefined && v !== null && String(v).trim() !== "") ? String(v) : null;
+  const eff_transaction_id = nz(transaction_id) ?? nz(leadAttr?.transaction_id) ?? null;
+  const eff_gclid = nz(gclid) ?? nz(leadAttr?.gclid) ?? null;
+  const eff_gbraid = nz(gbraid) ?? nz(leadAttr?.gbraid) ?? null;
+  const eff_wbraid = nz(wbraid) ?? nz(leadAttr?.wbraid) ?? null;
+  const eff_utm_source = nz(utm_source) ?? nz(leadAttr?.utm_source) ?? null;
+  const eff_utm_medium = nz(utm_medium) ?? nz(leadAttr?.utm_medium) ?? null;
+  const eff_utm_campaign = nz(utm_campaign) ?? nz(leadAttr?.utm_campaign) ?? null;
+  const eff_utm_content = nz(utm_content) ?? nz(leadAttr?.utm_content) ?? null;
+  const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
+
+  const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
+  // ECL-eligible: matched lead (uploader/Sheet pull PII via JOIN) OR the
+  // postback forwarded enough PII to match on hashed identifiers. Value is
+  // NOT required for transfers (they are always $0).
+  const hasEclData = Boolean(
+    match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
+  );
+  // Transfer statuses are intentionally distinct from 'ready_to_upload' so the
+  // Data-Manager API uploader (which selects status='ready_to_upload') never
+  // touches transfers. The Google Sheet view keys off event_type/identifier,
+  // not status, so these still export to the Sheet.
+  const status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
+
+  // Upsert by dedupe_key: a re-fired transfer postback is a no-op.
+  const { data: existing } = await supabase
+    .from("offline_conversion_events")
+    .select("id, status")
+    .eq("dedupe_key", dedupe_key)
+    .maybeSingle();
+
+  let eventId: string | null = null;
+  let inserted = false;
+
+  if (existing?.id) {
+    eventId = existing.id as string;
+    inserted = false;
+  } else {
+    const { data: newRow, error: insertErr } = await supabase
+      .from("offline_conversion_events")
+      .insert({
+        source: SOURCE,
+        event_type: EVENT_TYPE,
+        status,
+        lead_id: match.lead_id,
+        transaction_id: eff_transaction_id,
+        ringba_call_id,
+        calltools_call_id,
+        caller_id,
+        gclid: eff_gclid,
+        gbraid: eff_gbraid,
+        wbraid: eff_wbraid,
+        conversion_time: conversion_time.toISOString(),
+        conversion_value,
+        currency_code,
+        caller_email,
+        caller_first_name,
+        caller_last_name,
+        caller_zip,
+        caller_state,
+        publisher,
+        utm_source: eff_utm_source,
+        utm_medium: eff_utm_medium,
+        utm_campaign: eff_utm_campaign,
+        utm_content: eff_utm_content,
+        utm_term: eff_utm_term,
+        google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
+        google_ads_conversion_action_id:
+          Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_TRANSFERRED") || null,
+        google_ads_conversion_action_name: CONVERSION_NAME,
+        raw_payload: rawPayload,
+        dedupe_key,
+      })
+      .select("id")
+      .single();
+
+    if (insertErr) {
+      console.error("offline_conversion_events (transfer) insert error:", insertErr);
+      await supabase.from("api_logs").insert({
+        lead_id: match.lead_id,
+        transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+        caller_id: caller_id || "",
+        request_payload: rawPayload as object,
+        response_payload: { error: insertErr.message } as object,
+        http_status: 500,
+        success: false,
+        error_message: `ringba-transfer-webhook insert failed: ${insertErr.message}`,
+      });
+      return new Response(
+        JSON.stringify({ ok: true, stored: false }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    eventId = newRow!.id as string;
+    inserted = true;
+  }
+
+  await supabase.from("api_logs").insert({
+    lead_id: match.lead_id,
+    transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+    caller_id: caller_id || "",
+    request_payload: {
+      source: "ringba-transfer-webhook",
+      raw: rawPayload,
+      parsed: {
+        ringba_call_id, gclid, gbraid, wbraid,
+        conversion_time: conversion_time.toISOString(),
+        currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
+      },
+    } as object,
+    response_payload: {
+      event_id: eventId, inserted, status,
+      matched_by: match.matched_by, dedupe_key,
+    } as object,
+    http_status: 200,
+    success: true,
+    error_message: null,
+  });
+
+  return new Response(
+    JSON.stringify({
+      ok: true, event_id: eventId, inserted, status,
+      event_type: EVENT_TYPE, matched_by: match.matched_by,
+    }),
+    { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+});
