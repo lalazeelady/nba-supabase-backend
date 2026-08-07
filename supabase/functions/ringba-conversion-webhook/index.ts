@@ -431,7 +431,9 @@ Deno.serve(async (req: Request) => {
   );
   let status: string;
   if ((hasClickId || hasEclData) && conversion_value > 0) {
-    status = "ready_to_upload";
+    // 'monetize_ready' = a monetized (CCO) event ready to upload; parallels the
+    // transfer path's 'transfer_ready'. (Renamed from 'ready_to_upload' 2026-08-07.)
+    status = "monetize_ready";
   } else if (match.lead_id) {
     status = "matched";
   } else {
