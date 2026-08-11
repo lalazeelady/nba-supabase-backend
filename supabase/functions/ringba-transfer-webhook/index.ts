@@ -5,7 +5,7 @@
 // call into Ringba (before/regardless of a buyer answering). Stores each as a
 // $0, count-only offline-conversion event in public.offline_conversion_events
 // with event_type='call_transferred', for upload to the Google Ads "CallXfer"
-// conversion action via the Google Sheet path.
+// conversion action.
 //
 // This is a DEDICATED sibling of ringba-conversion-webhook (the revenue
 // webhook). It deliberately does NOT touch that function so the revenue path
@@ -16,21 +16,14 @@
 //   - event_type       = 'call_transferred'  (revenue: 'call_converted_revenue')
 //   - conversion_value = 0, always forced     (transfers are a count signal)
 //   - conversion_name  = 'CallXfer'
-//   - status           = 'transfer_ready' | 'transfer_unmatched'  — NEVER
-//     'ready_to_upload', so the Data-Manager API uploader
-//     (upload-google-offline-conversions) ignores transfers entirely. Transfers
-//     ride the Google Sheet path ONLY (v_google_sheet_export_unsynced, which
-//     was extended to emit $0 call_transferred rows).
+//   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
-// De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
-// 'ringba:call_transferred:<phone_last10>:<ET-date>', so all same-day repeat
-// transfers from the same number — agent double-presses AND callbacks —
-// collapse into a single conversion (existing upsert-ignoreDuplicates makes the
-// repeats no-ops). Falls back to '<ringba_call_id>' then '<click>:<time>' when
-// no caller phone is present. Namespaced by event_type, so this is fully
-// independent of the REVENUE event (ringba:call_converted_revenue:<call_id>,
-// separate webhook, separate Google action) — collapsing transfers never
-// affects which monetized call is counted.
+// De-dup: upload EVERY transfer. dedupe_key is
+// 'ringba:call_transferred:<ringba_call_id>', so each distinct transferred call
+// becomes its own CallXfer row and uploads; only an exact re-fire of the SAME
+// call id is a no-op (and Google de-dupes those by Order ID too). Falls back to
+// '<phone|click>:<full-timestamp>' when no call id is present (rare). Namespaced
+// by event_type, so this is fully independent of the REVENUE event.
 //
 // Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
 // compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
@@ -50,8 +43,6 @@ const EVENT_TYPE = "call_transferred";
 const CONVERSION_NAME = "CallXfer";
 
 // Field-name variants we accept from Ringba. First non-empty value wins.
-// Mirrors the revenue webhook so the same Ringba token template works here
-// (minus conversion_value, which is forced to 0).
 const FIELD_VARIANTS = {
   ringba_call_id: [
     "ringba_call_id", "call_id", "callId", "callid",
@@ -155,17 +146,9 @@ function phoneLast10(raw: string | null): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-// Eastern-Time calendar date (YYYY-MM-DD) of a timestamp — the business day the
-// call center thinks in, matching the Order-ID date+phone convention.
-function etDate(d: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(d);
-}
-
-// dedupe_key: ONE CallXfer per caller per ET-day. Prefer phone+date so same-day
-// repeats collapse; fall back to call id, then click:time, when no phone.
+// dedupe_key: upload EVERY distinct transfer — key on the call's own id, so only
+// an exact re-fire of the same call collapses. Fall back to phone|click + full
+// timestamp (maximally unique) when no call id is present (rare).
 function buildDedupeKey(args: {
   caller_id: string | null;
   ringba_call_id: string | null;
@@ -174,15 +157,11 @@ function buildDedupeKey(args: {
   wbraid: string | null;
   conversion_time: Date;
 }): string {
-  const p = phoneLast10(args.caller_id);
-  if (p) {
-    return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
-  }
   if (args.ringba_call_id) {
     return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
   }
-  const click = args.gclid || args.gbraid || args.wbraid || "no_click";
-  return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
+  const who = phoneLast10(args.caller_id) || args.gclid || args.gbraid || args.wbraid || "no_id";
+  return `${SOURCE}:${EVENT_TYPE}:${who}:${args.conversion_time.toISOString()}`;
 }
 
 function normalizePhone(raw: string | null): string | null {
@@ -289,8 +268,6 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
 
-  // Ringba GET pixels send everything in the query string; accept POST bodies
-  // too (JSON or form) for flexibility. Body wins over query on conflict.
   const queryPayload = Object.fromEntries(url.searchParams.entries());
   let bodyPayload: Record<string, unknown> = {};
   if (req.method === "POST") {
@@ -401,16 +378,11 @@ Deno.serve(async (req: Request) => {
   const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
 
   const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
-  // ECL-eligible: matched lead (uploader/Sheet pull PII via JOIN) OR the
-  // postback forwarded enough PII to match on hashed identifiers. Value is
+  // ECL-eligible: matched lead OR the postback forwarded enough PII. Value is
   // NOT required for transfers (they are always $0).
   const hasEclData = Boolean(
     match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
   );
-  // Transfer statuses are intentionally distinct from 'ready_to_upload' so the
-  // Data-Manager API uploader (which selects status='ready_to_upload') never
-  // touches transfers. The Google Sheet view keys off event_type/identifier,
-  // not status, so these still export to the Sheet.
   const status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
 
   // Upsert by dedupe_key: a re-fired transfer postback is a no-op.
