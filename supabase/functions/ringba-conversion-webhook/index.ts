@@ -131,14 +131,47 @@ function parseNumber(s: string | null): number | null {
 
 function parseTimestamp(s: string | null): Date | null {
   if (!s) return null;
-  // Pure-numeric → epoch seconds or ms
-  if (/^\d+$/.test(s)) {
-    const n = Number(s);
-    const ms = s.length <= 10 ? n * 1000 : n;
-    const d = new Date(ms);
+  const t = s.trim();
+  if (!t) return null;
+
+  // Pure-numeric → epoch seconds or ms.
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    const d = new Date(t.length <= 10 ? n * 1000 : n);
     return isNaN(d.getTime()) ? null : d;
   }
-  const d = new Date(s);
+
+  // Interpret explicitly as UTC (runtime-independent). Our senders (Ringba,
+  // CallTools) report call times in UTC but often as timezone-less strings, so
+  // we must not depend on the runtime's local zone.
+  //
+  // ISO-ish: normalize a space date/time separator, a space-delimited offset
+  // (CallTools sends "... 00:00"), and a colon-less "+0000"; assume UTC if no
+  // offset is present.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(t)) {
+    let iso = t.replace(" ", "T")
+      .replace(/T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\d{2}):?(\d{2})$/, "T$1+$2:$3")
+      .replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+    if (!/[zZ]$|[+-]\d{2}:\d{2}$/.test(iso)) iso += "Z";
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // US "M/D/YYYY H:MM:SS [AM/PM]" (Ringba CallDateTime) → build in UTC.
+  const us = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
+  if (us) {
+    let hour = Number(us[4]);
+    if (us[7]) {
+      const pm = /[Pp]/.test(us[7]);
+      if (pm && hour < 12) hour += 12;
+      if (!pm && hour === 12) hour = 0;
+    }
+    const d = new Date(Date.UTC(Number(us[3]), Number(us[1]) - 1, Number(us[2]), hour, Number(us[5]), Number(us[6])));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Fallback (best effort).
+  const d = new Date(t);
   return isNaN(d.getTime()) ? null : d;
 }
 
