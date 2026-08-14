@@ -5,7 +5,7 @@
 // call into Ringba (before/regardless of a buyer answering). Stores each as a
 // $0, count-only offline-conversion event in public.offline_conversion_events
 // with event_type='call_transferred', for upload to the Google Ads "CallXfer"
-// conversion action via the Google Sheet path.
+// conversion action.
 //
 // This is a DEDICATED sibling of ringba-conversion-webhook (the revenue
 // webhook). It deliberately does NOT touch that function so the revenue path
@@ -16,21 +16,14 @@
 //   - event_type       = 'call_transferred'  (revenue: 'call_converted_revenue')
 //   - conversion_value = 0, always forced     (transfers are a count signal)
 //   - conversion_name  = 'CallXfer'
-//   - status           = 'transfer_ready' | 'transfer_unmatched'  — NEVER
-//     'ready_to_upload', so the Data-Manager API uploader
-//     (upload-google-offline-conversions) ignores transfers entirely. Transfers
-//     ride the Google Sheet path ONLY (v_google_sheet_export_unsynced, which
-//     was extended to emit $0 call_transferred rows).
+//   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
 // De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
-// 'ringba:call_transferred:<phone_last10>:<ET-date>', so all same-day repeat
-// transfers from the same number — agent double-presses AND callbacks —
-// collapse into a single conversion (existing upsert-ignoreDuplicates makes the
-// repeats no-ops). Falls back to '<ringba_call_id>' then '<click>:<time>' when
-// no caller phone is present. Namespaced by event_type, so this is fully
-// independent of the REVENUE event (ringba:call_converted_revenue:<call_id>,
-// separate webhook, separate Google action) — collapsing transfers never
-// affects which monetized call is counted.
+// 'ringba:call_transferred:<phone_last10>:<ET-date>', so uploads to Google equal
+// the "distinct phone numbers per day" in the Ringba report — all same-day
+// repeat transfers from one number collapse to a single conversion. Falls back
+// to the call id (then click:time) only when no caller phone is present.
+// Namespaced by event_type, so this is fully independent of the REVENUE event.
 //
 // Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
 // compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
@@ -50,8 +43,6 @@ const EVENT_TYPE = "call_transferred";
 const CONVERSION_NAME = "CallXfer";
 
 // Field-name variants we accept from Ringba. First non-empty value wins.
-// Mirrors the revenue webhook so the same Ringba token template works here
-// (minus conversion_value, which is forced to 0).
 const FIELD_VARIANTS = {
   ringba_call_id: [
     "ringba_call_id", "call_id", "callId", "callid",
@@ -109,13 +100,42 @@ function pick(obj: Record<string, unknown>, keys: readonly string[]): string | n
 
 function parseTimestamp(s: string | null): Date | null {
   if (!s) return null;
-  if (/^\d+$/.test(s)) {
-    const n = Number(s);
-    const ms = s.length <= 10 ? n * 1000 : n;
-    const d = new Date(ms);
+  const t = s.trim();
+  if (!t) return null;
+
+  // Pure-numeric → epoch seconds or ms.
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    const d = new Date(t.length <= 10 ? n * 1000 : n);
     return isNaN(d.getTime()) ? null : d;
   }
-  const d = new Date(s);
+
+  // Interpret explicitly as UTC (runtime-independent). Our senders (Ringba,
+  // CallTools) report call times in UTC but often as timezone-less strings, so
+  // we must not depend on the runtime's local zone.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(t)) {
+    let iso = t.replace(" ", "T")
+      .replace(/T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\d{2}):?(\d{2})$/, "T$1+$2:$3")
+      .replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+    if (!/[zZ]$|[+-]\d{2}:\d{2}$/.test(iso)) iso += "Z";
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // US "M/D/YYYY H:MM:SS [AM/PM]" (Ringba CallDateTime) → build in UTC.
+  const us = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
+  if (us) {
+    let hour = Number(us[4]);
+    if (us[7]) {
+      const pm = /[Pp]/.test(us[7]);
+      if (pm && hour < 12) hour += 12;
+      if (!pm && hour === 12) hour = 0;
+    }
+    const d = new Date(Date.UTC(Number(us[3]), Number(us[1]) - 1, Number(us[2]), hour, Number(us[5]), Number(us[6])));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const d = new Date(t);
   return isNaN(d.getTime()) ? null : d;
 }
 
@@ -126,8 +146,8 @@ function phoneLast10(raw: string | null): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-// Eastern-Time calendar date (YYYY-MM-DD) of a timestamp — the business day the
-// call center thinks in, matching the Order-ID date+phone convention.
+// Eastern-Time calendar date (YYYY-MM-DD) — the business day the call center
+// (and the Ringba report) thinks in.
 function etDate(d: Date): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
@@ -135,8 +155,12 @@ function etDate(d: Date): string {
   }).format(d);
 }
 
-// dedupe_key: ONE CallXfer per caller per ET-day. Prefer phone+date so same-day
-// repeats collapse; fall back to call id, then click:time, when no phone.
+// dedupe_key: ONE CallXfer per caller per Eastern-Time day, so uploads match
+// "distinct phone numbers per day" in the Ringba/CallTools report. All same-day
+// repeat transfers from one number (agent re-presses, callbacks, bounce between
+// buyers) collapse into a single conversion. A next-day callback counts fresh.
+// Fall back to the call id (then click:time) only when no caller phone is
+// present, so an anonymous transfer is never silently merged with another.
 function buildDedupeKey(args: {
   caller_id: string | null;
   ringba_call_id: string | null;
@@ -260,8 +284,6 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
 
-  // Ringba GET pixels send everything in the query string; accept POST bodies
-  // too (JSON or form) for flexibility. Body wins over query on conflict.
   const queryPayload = Object.fromEntries(url.searchParams.entries());
   let bodyPayload: Record<string, unknown> = {};
   if (req.method === "POST") {
@@ -372,16 +394,11 @@ Deno.serve(async (req: Request) => {
   const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
 
   const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
-  // ECL-eligible: matched lead (uploader/Sheet pull PII via JOIN) OR the
-  // postback forwarded enough PII to match on hashed identifiers. Value is
+  // ECL-eligible: matched lead OR the postback forwarded enough PII. Value is
   // NOT required for transfers (they are always $0).
   const hasEclData = Boolean(
     match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
   );
-  // Transfer statuses are intentionally distinct from 'ready_to_upload' so the
-  // Data-Manager API uploader (which selects status='ready_to_upload') never
-  // touches transfers. The Google Sheet view keys off event_type/identifier,
-  // not status, so these still export to the Sheet.
   const status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
 
   // Upsert by dedupe_key: a re-fired transfer postback is a no-op.
