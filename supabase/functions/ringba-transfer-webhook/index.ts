@@ -18,12 +18,12 @@
 //   - conversion_name  = 'CallXfer'
 //   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
-// De-dup: upload EVERY transfer. dedupe_key is
-// 'ringba:call_transferred:<ringba_call_id>', so each distinct transferred call
-// becomes its own CallXfer row and uploads; only an exact re-fire of the SAME
-// call id is a no-op (and Google de-dupes those by Order ID too). Falls back to
-// '<phone|click>:<full-timestamp>' when no call id is present (rare). Namespaced
-// by event_type, so this is fully independent of the REVENUE event.
+// De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
+// 'ringba:call_transferred:<phone_last10>:<ET-date>', so uploads to Google equal
+// the "distinct phone numbers per day" in the Ringba report — all same-day
+// repeat transfers from one number collapse to a single conversion. Falls back
+// to the call id (then click:time) only when no caller phone is present.
+// Namespaced by event_type, so this is fully independent of the REVENUE event.
 //
 // Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
 // compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
@@ -146,9 +146,21 @@ function phoneLast10(raw: string | null): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-// dedupe_key: upload EVERY distinct transfer — key on the call's own id, so only
-// an exact re-fire of the same call collapses. Fall back to phone|click + full
-// timestamp (maximally unique) when no call id is present (rare).
+// Eastern-Time calendar date (YYYY-MM-DD) — the business day the call center
+// (and the Ringba report) thinks in.
+function etDate(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
+
+// dedupe_key: ONE CallXfer per caller per Eastern-Time day, so uploads match
+// "distinct phone numbers per day" in the Ringba/CallTools report. All same-day
+// repeat transfers from one number (agent re-presses, callbacks, bounce between
+// buyers) collapse into a single conversion. A next-day callback counts fresh.
+// Fall back to the call id (then click:time) only when no caller phone is
+// present, so an anonymous transfer is never silently merged with another.
 function buildDedupeKey(args: {
   caller_id: string | null;
   ringba_call_id: string | null;
@@ -157,11 +169,15 @@ function buildDedupeKey(args: {
   wbraid: string | null;
   conversion_time: Date;
 }): string {
+  const p = phoneLast10(args.caller_id);
+  if (p) {
+    return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
+  }
   if (args.ringba_call_id) {
     return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
   }
-  const who = phoneLast10(args.caller_id) || args.gclid || args.gbraid || args.wbraid || "no_id";
-  return `${SOURCE}:${EVENT_TYPE}:${who}:${args.conversion_time.toISOString()}`;
+  const click = args.gclid || args.gbraid || args.wbraid || "no_click";
+  return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
 }
 
 function normalizePhone(raw: string | null): string | null {
