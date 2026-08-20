@@ -11,8 +11,17 @@ SELECTs plus two no-op probes (`?dry_run=true` / `?validate_only=true`, which wr
 Google was showing fewer conversions than reality because **both** delivery paths out of Supabase
 had silently stalled — not Ringba, not CallTools, not ingestion, not Google auth. A single database
 **view read was exceeding the 8-second Postgres `statement_timeout`**, so both uploader functions
-500'd *before* they sent anything. One-line-in-spirit fix (stop dragging a big JSON column through a
-sort); **verified byte-for-byte identical output**, measured 7.6s → 3.3s.
+500'd *before* they sent anything.
+
+**What restored service (2026-08-20):** raising `service_role`'s `statement_timeout` 8s → 30s so the
+~11s read stops being cancelled. Both paths resumed immediately; the Sheet path caught up within
+minutes and the API backlog was set to drain over a few hours.
+
+**Important:** the view-narrowing migration in this branch (drop `raw_payload` from the window sort)
+is **verified byte-for-byte identical** and a small improvement, but on its own it was **NOT enough** —
+the `order_id` rank forces the full-table `row_number()` window sort, which still runs ~11s. So the
+30s timeout is a **stopgap**. The **durable fix** (make the read fast, then return to 8s) is pending —
+see "Durable follow-up" below.
 
 ---
 
@@ -66,18 +75,24 @@ the Data Manager destinations.
 
 ---
 
-## The fix (this branch)
+## What was applied to production (2026-08-20, in order)
 
-`supabase/migrations/20260820120000_narrow_offline_export_view_ip_only.sql`
+1. **`20260820120000_narrow_offline_export_view_ip_only.sql`** — `create or replace view` carrying
+   only `raw_payload->>'ip_address'` (not the whole jsonb) through the window CTE. **Verified
+   byte-identical** (`new EXCEPT old = 0`, `old EXCEPT new = 0`, all 30 cols / 66,269 rows). Applied.
+   *Caveat:* insufficient alone — a `count(*)` test looked like 3.3s because it pruned the window, but
+   the real functions select `order_id`, which references the per-day/phone rank and forces the full
+   `row_number()` sort (~11s). Kept because it's harmless and a genuine (small) improvement.
+2. **`20260820140000_bump_service_role_statement_timeout.sql`** — `alter role service_role set
+   statement_timeout = '30s'`. **This is what actually restored delivery.** Only affects trusted
+   server-side queries (edge functions); anon/authenticated stay at their limits. Reversible:
+   `alter role service_role reset statement_timeout;`. **Stopgap** — remove once the read is <8s.
+3. **`20260820150000_raise_upload_cron_limit.sql`** — bumped the `upload-google-offline-conversions`
+   cron from the default 50 rows/run to `?limit=250` (+150s timeout) to drain the ~6.8k API backlog
+   in ~4-5h instead of ~34h. Revert to 50 once caught up if preferred.
 
-`create or replace view v_offline_conversion_export` — **identical** to the current definition except
-the CTE carries `nullif(raw_payload->>'ip_address','') as ip_raw` instead of the whole `raw_payload`
-jsonb. The window sort then handles narrow rows and stays in memory.
-
-- **Measured after:** 3,297 ms (2.3× headroom under 8 s).
-- **Output verified byte-identical:** `new EXCEPT old = 0` and `old EXCEPT new = 0` across all 30
-  columns / 66,269 rows. No filter, ordering, `order_id`, or dedup change.
-- The wrapper view needs no change (its columns are unchanged).
+After (2): Sheet backlog 799 → ~3 within minutes; API uploads resumed. The wrapper view needed no
+change.
 
 ### Why NOT a date-bound (the approach we first picked)
 We planned to bound the view by date. Investigation showed that's unsafe here: `conversion_time`

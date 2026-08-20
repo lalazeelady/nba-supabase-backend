@@ -1,0 +1,21 @@
+-- STOPGAP (2026-08-20): restore offline-conversion delivery immediately.
+--
+-- The export read (v_offline_conversion_export) runs a row_number() window over
+-- the whole offline_conversion_events table and takes ~11s — over the 8s
+-- statement_timeout the edge-function role inherits — so sync-google-sheet and
+-- upload-google-offline-conversions were 500'ing before sending anything.
+--
+-- The byte-identical view-narrowing (20260820120000) was not enough on its own,
+-- so we give service_role headroom over the 11s read. service_role is used only
+-- by trusted server-side code (edge functions); anon/authenticated keep their
+-- own (8s/3s) limits, so public API surface is unaffected.
+--
+-- THIS IS A STOPGAP. Remove it once the durable fix lands (make the read <8s):
+--   alter role service_role reset statement_timeout;
+-- See docs/pipeline-incident-2026-08/README.md ("Durable follow-up").
+--
+-- NOTE: PostgREST caches role settings; after applying, run
+--   notify pgrst, 'reload config';
+-- (or wait for its periodic reload) for the new limit to take effect.
+
+alter role service_role set statement_timeout = '30s';
