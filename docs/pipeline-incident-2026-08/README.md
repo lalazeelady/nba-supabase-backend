@@ -15,13 +15,13 @@ had silently stalled — not Ringba, not CallTools, not ingestion, not Google au
 
 **What restored service (2026-08-20):** raising `service_role`'s `statement_timeout` 8s → 30s so the
 ~11s read stops being cancelled. Both paths resumed immediately; the Sheet path caught up within
-minutes and the API backlog was set to drain over a few hours.
+minutes and the API backlog drained over a few hours.
 
-**Important:** the view-narrowing migration in this branch (drop `raw_payload` from the window sort)
-is **verified byte-for-byte identical** and a small improvement, but on its own it was **NOT enough** —
-the `order_id` rank forces the full-table `row_number()` window sort, which still runs ~11s. So the
-30s timeout is a **stopgap**. The **durable fix** (make the read fast, then return to 8s) is pending —
-see "Durable follow-up" below.
+**RESOLVED (2026-08-21):** the durable fix is now applied — `order_id` is precomputed at ingest and
+stored in a column, the export view drops the `row_number()` window and reads the column via index
+(**105 ms** vs ~11 s), and `service_role`'s timeout is back to the safe **8 s**. Both delivery
+functions return 200 under 8 s. The 30 s stopgap is removed. See "Durable follow-up" below for the
+step-by-step and the read-only proofs (byte-identical output; 0 order_id mismatches across 67,952 rows).
 
 ---
 
