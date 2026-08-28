@@ -18,12 +18,11 @@
 //   - conversion_name  = 'CallXfer'
 //   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
-// De-dup: ONE CallXfer per caller per Eastern-Time day. dedupe_key is
-// 'ringba:call_transferred:<phone_last10>:<ET-date>', so uploads to Google equal
-// the "distinct phone numbers per day" in the Ringba report — all same-day
-// repeat transfers from one number collapse to a single conversion. Falls back
-// to the call id (then click:time) only when no caller phone is present.
-// Namespaced by event_type, so this is fully independent of the REVENUE event.
+// De-dup: GROSS — ONE CallXfer per Ringba CALL. dedupe_key is
+// 'ringba:call_transferred:<conversion_call_id>', so uploads to Google equal Ringba's gross
+// transfer count; only re-fires of the SAME call collapse. Phone+ET-day is a fallback used
+// only when a transfer arrives with no call id. Namespaced by event_type, so this is fully
+// independent of the REVENUE event.
 //
 // Auth: shared secret in the `x-webhook-secret` header or `?secret=` query,
 // compared against RINGBA_WEBHOOK_SECRET (reused from the revenue webhook).
@@ -43,8 +42,10 @@ const EVENT_TYPE = "call_transferred";
 const CONVERSION_NAME = "CallXfer";
 
 // Field-name variants we accept from Ringba. First non-empty value wins.
+// `conversion_call_id` = the id of the transferred call (Ringba 'RGB…').
 const FIELD_VARIANTS = {
-  ringba_call_id: [
+  conversion_call_id: [
+    "conversion_call_id",
     "ringba_call_id", "call_id", "callId", "callid",
     "inboundCallId", "inbound_call_id", "uuid",
   ],
@@ -88,6 +89,14 @@ const FIELD_VARIANTS = {
   utm_campaign: ["utm_campaign", "utmCampaign", "utm_camp"],
   utm_content: ["utm_content", "utmContent"],
   utm_term: ["utm_term", "utmTerm"],
+  // Attribution/reporting extras (stored where present).
+  ib_source: ["ib_source", "inbound_route", "inbound_route][name]", "inboundRoute", "ibSource"],
+  oppref: ["oppref_id", "oppref", "opprefId"],
+  msclkid: ["msclkid", "msclkId"],
+  fbclid: ["fbclid", "fbclId"],
+  agent_name: ["agent_name", "agentName", "agent"],
+  queue: ["queue", "queue_name", "queueName", "queue_id", "queueId", "queueid"],
+  call_type: ["call_type", "callType"],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -155,26 +164,24 @@ function etDate(d: Date): string {
   }).format(d);
 }
 
-// dedupe_key: ONE CallXfer per caller per Eastern-Time day, so uploads match
-// "distinct phone numbers per day" in the Ringba/CallTools report. All same-day
-// repeat transfers from one number (agent re-presses, callbacks, bounce between
-// buyers) collapse into a single conversion. A next-day callback counts fresh.
-// Fall back to the call id (then click:time) only when no caller phone is
-// present, so an anonymous transfer is never silently merged with another.
+// dedupe_key: GROSS — ONE CallXfer per Ringba CALL (keyed on the per-call 'RGB…' id), so
+// every qualified transfer is counted, matching Ringba's gross transfer count. Only re-fires
+// of the SAME call (same id) collapse. Phone+ET-day is a fallback used only when a transfer
+// arrives with no call id, so an anonymous transfer is never merged with a different call id.
 function buildDedupeKey(args: {
+  conversion_call_id: string | null;
   caller_id: string | null;
-  ringba_call_id: string | null;
   gclid: string | null;
   gbraid: string | null;
   wbraid: string | null;
   conversion_time: Date;
 }): string {
+  if (args.conversion_call_id) {
+    return `${SOURCE}:${EVENT_TYPE}:${args.conversion_call_id}`;
+  }
   const p = phoneLast10(args.caller_id);
   if (p) {
     return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
-  }
-  if (args.ringba_call_id) {
-    return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
   }
   const click = args.gclid || args.gbraid || args.wbraid || "no_click";
   return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
@@ -311,7 +318,7 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  const ringba_call_id = pick(merged, FIELD_VARIANTS.ringba_call_id);
+  const conversion_call_id = pick(merged, FIELD_VARIANTS.conversion_call_id);
   const calltools_call_id = pick(merged, FIELD_VARIANTS.calltools_call_id);
   const caller_id = pick(merged, FIELD_VARIANTS.caller_id);
   const gclid = pick(merged, FIELD_VARIANTS.gclid);
@@ -336,6 +343,13 @@ Deno.serve(async (req: Request) => {
   const utm_campaign = pick(merged, FIELD_VARIANTS.utm_campaign);
   const utm_content = pick(merged, FIELD_VARIANTS.utm_content);
   const utm_term = pick(merged, FIELD_VARIANTS.utm_term);
+  const ib_source = pick(merged, FIELD_VARIANTS.ib_source);
+  const oppref = pick(merged, FIELD_VARIANTS.oppref);
+  const msclkid = pick(merged, FIELD_VARIANTS.msclkid);
+  const fbclid = pick(merged, FIELD_VARIANTS.fbclid);
+  const agent_name = pick(merged, FIELD_VARIANTS.agent_name);
+  const queue = pick(merged, FIELD_VARIANTS.queue);
+  const call_type = pick(merged, FIELD_VARIANTS.call_type);
 
   // Transfers are a count signal: value is ALWAYS $0, regardless of any
   // conversion_value the pixel might carry.
@@ -346,7 +360,7 @@ Deno.serve(async (req: Request) => {
   if ((publisher || "").trim().toUpperCase() !== "NBA") {
     await supabase.from("api_logs").insert({
       lead_id: null,
-      transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+      transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
       caller_id: caller_id || "",
       request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
       response_payload: {
@@ -363,7 +377,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const dedupe_key = buildDedupeKey({
-    caller_id, ringba_call_id, gclid, gbraid, wbraid, conversion_time,
+    conversion_call_id, caller_id, gclid, gbraid, wbraid, conversion_time,
   });
 
   const match = await matchLead(supabase, {
@@ -423,7 +437,7 @@ Deno.serve(async (req: Request) => {
         status,
         lead_id: match.lead_id,
         transaction_id: eff_transaction_id,
-        ringba_call_id,
+        conversion_call_id,
         calltools_call_id,
         caller_id,
         gclid: eff_gclid,
@@ -438,6 +452,13 @@ Deno.serve(async (req: Request) => {
         caller_zip,
         caller_state,
         publisher,
+        ib_source,
+        oppref,
+        msclkid,
+        fbclid,
+        agent_name,
+        queue,
+        call_type,
         utm_source: eff_utm_source,
         utm_medium: eff_utm_medium,
         utm_campaign: eff_utm_campaign,
@@ -457,7 +478,7 @@ Deno.serve(async (req: Request) => {
       console.error("offline_conversion_events (transfer) insert error:", insertErr);
       await supabase.from("api_logs").insert({
         lead_id: match.lead_id,
-        transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+        transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
         caller_id: caller_id || "",
         request_payload: rawPayload as object,
         response_payload: { error: insertErr.message } as object,
@@ -477,13 +498,13 @@ Deno.serve(async (req: Request) => {
 
   await supabase.from("api_logs").insert({
     lead_id: match.lead_id,
-    transaction_id: transaction_id || ringba_call_id || "ringba-transfer-unknown",
+    transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
     caller_id: caller_id || "",
     request_payload: {
       source: "ringba-transfer-webhook",
       raw: rawPayload,
       parsed: {
-        ringba_call_id, gclid, gbraid, wbraid,
+        conversion_call_id, gclid, gbraid, wbraid,
         conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
       },

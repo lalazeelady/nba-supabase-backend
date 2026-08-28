@@ -18,7 +18,7 @@
 //     Data Manager "older than 90 days" error (the API analogue of the Sheet's archiver).
 //   AND upload_attempts < MAX_ATTEMPTS.
 //
-// Order ID: uses the view's order_id (ringba_call_id -> calltools_call_id -> ...),
+// Order ID: uses the view's order_id (conversion_call_id -> calltools_call_id -> ...),
 //   identical to the Sheet, so if both paths ever feed the same action Google
 //   de-dupes them (transactionId is the Google order id).
 //

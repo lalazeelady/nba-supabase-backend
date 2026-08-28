@@ -1,7 +1,7 @@
 // backfill-google-sheet-pii
 //
 // One-shot helper: walks the Google Sheet, finds rows whose PII columns
-// (I:O) are blank, looks up each row's Order ID (ringba_call_id) in
+// (I:O) are blank, looks up each row's Order ID (conversion_call_id) in
 // offline_conversion_events + leads JOIN, and batch-updates the missing
 // PII back into the Sheet.
 //
@@ -186,17 +186,17 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
 
-  // 1. Build PII map keyed by ringba_call_id from oce + leads JOIN.
+  // 1. Build PII map keyed by conversion_call_id from oce + leads JOIN.
   // (PostgREST nested select via the foreign key on offline_conversion_events.lead_id.)
   const { data: oceRows, error: oceErr } = await supabase
     .from("offline_conversion_events")
     .select(
-      "ringba_call_id, caller_email, caller_id, caller_first_name, caller_last_name, raw_payload, " +
+      "conversion_call_id, caller_email, caller_id, caller_first_name, caller_last_name, raw_payload, " +
       "lead:leads ( email, phone, first_name, last_name, ip_address )",
     )
     .eq("publisher", "NBA")
     .gt("conversion_value", 0)
-    .not("ringba_call_id", "is", null);
+    .not("conversion_call_id", "is", null);
 
   if (oceErr) {
     return new Response(
@@ -207,7 +207,7 @@ Deno.serve(async (req: Request) => {
 
   const piiByOrderId = new Map<string, PiiTuple>();
   for (const r of (oceRows ?? []) as Array<Record<string, unknown>>) {
-    const orderId = String(r.ringba_call_id || "").trim();
+    const orderId = String(r.conversion_call_id || "").trim();
     if (!orderId) continue;
     const lead = (r.lead || {}) as Record<string, unknown>;
     const rawPayload = (r.raw_payload || {}) as Record<string, unknown>;

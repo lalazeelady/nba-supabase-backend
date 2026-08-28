@@ -270,6 +270,20 @@ interface LeadPayload {
   utm_campaign?: string;
   utm_content?: string;
   utm_term?: string;
+  lead_source?: string;   // explicit source override (funnel-supplied, later)
+  landing_page?: string;  // landing-page id: apply1 / apply2 / info01 / ... (funnel-supplied, later)
+}
+
+// Best-effort lead source from utm_source until the funnel sends an explicit lead_source.
+// Normalizes the common paid sources; passes anything else through; blank -> null.
+function deriveLeadSource(utmSource?: string): string | null {
+  const s = (utmSource || "").trim().toLowerCase();
+  if (!s) return null;
+  if (s.includes("google")) return "google";
+  if (s.includes("bing") || s.includes("microsoft")) return "bing";
+  if (s.includes("openai") || s.includes("chatgpt")) return "openai";
+  if (s.includes("facebook") || s.includes("meta") || s.includes("fb")) return "meta";
+  return s;
 }
 
 Deno.serve(async (req: Request) => {
@@ -443,6 +457,13 @@ Deno.serve(async (req: Request) => {
         utm_campaign: payload.utm_campaign || null,
         utm_content: payload.utm_content || null,
         utm_term: payload.utm_term || null,
+        // Source + landing page (backend-ready now; the funnel starts sending these in a later
+        // site-repo task). lead_source: prefer an explicit value, else derive from utm_source
+        // so google/bing/openai/meta are distinguishable today.
+        lead_source: (payload.lead_source && String(payload.lead_source).trim())
+          || deriveLeadSource(payload.utm_source)
+          || null,
+        landing_page: (payload.landing_page && String(payload.landing_page).trim()) || null,
       })
       .select()
       .single();

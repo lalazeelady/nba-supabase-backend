@@ -33,12 +33,16 @@ const corsHeaders = {
     "Content-Type, Authorization, X-Client-Info, Apikey, x-webhook-secret, x-invoke-secret",
 };
 
-const SOURCE = "ringba";
+// Default source; overridden to 'caliber' per-request when the Caliber-only `status`
+// field is present (see the is_caliber check in the handler).
+const DEFAULT_SOURCE = "ringba";
 const EVENT_TYPE = "call_converted_revenue";
 
-// Field-name variants we accept from Ringba. First non-empty value wins.
+// Field-name variants we accept. First non-empty value wins. `conversion_call_id` holds the
+// call id of the CONVERTED call: Ringba (RGB…), Caliber (`call_id`), or CallTools interim id.
 const FIELD_VARIANTS = {
-  ringba_call_id: [
+  conversion_call_id: [
+    "conversion_call_id",
     "ringba_call_id", "call_id", "callId", "callid",
     "inboundCallId", "inbound_call_id", "uuid",
   ],
@@ -110,6 +114,16 @@ const FIELD_VARIANTS = {
   utm_campaign: ["utm_campaign", "utmCampaign", "utm_camp"],
   utm_content: ["utm_content", "utmContent"],
   utm_term: ["utm_term", "utmTerm"],
+  // Caliber (and where present, other pixels) — stored for attribution/reporting.
+  ib_source: ["ib_source", "inbound_route", "inbound_route][name]", "inboundRoute", "ibSource"],
+  oppref: ["oppref_id", "oppref", "opprefId"],
+  msclkid: ["msclkid", "msclkId"],
+  fbclid: ["fbclid", "fbclId"],
+  agent_name: ["agent_name", "agentName", "agent"],
+  queue: ["queue", "queue_name", "queueName", "queue_id", "queueId", "queueid"],
+  call_type: ["call_type", "callType"],
+  // Caliber call status (connected / no connect / ...). Its PRESENCE marks a Caliber fire.
+  call_status: ["status", "Status", "call_status", "callStatus"],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -191,21 +205,47 @@ async function parseRequestBody(req: Request): Promise<Record<string, unknown>> 
   }
 }
 
+// Last 10 digits of a phone, or null if fewer than 10 are present.
+function phoneLast10(raw: string | null): string | null {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+// Eastern-Time calendar date (YYYY-MM-DD) — the business day used for internet phone/day dedup.
+function etDate(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
+
+// Dedupe grain by source (matches the order_id trigger so dedupe_key and order_id agree):
+//   * Caliber (internet)          -> phone + ET-day  (owner's rule: unexplained multi-fires)
+//   * Ringba / CallTools interim  -> conversion_call_id (RGB per-call | CT contact id) [UNCHANGED]
+// Falls back to click:time (+value for non-caliber) when the primary key is absent.
 function buildDedupeKey(args: {
-  ringba_call_id: string | null;
+  source: string;
+  is_caliber: boolean;
+  conversion_call_id: string | null;
+  caller_id: string | null;
   gclid: string | null;
   gbraid: string | null;
   wbraid: string | null;
   conversion_time: Date;
   conversion_value: number;
 }): string {
-  if (args.ringba_call_id) {
-    return `${SOURCE}:${EVENT_TYPE}:${args.ringba_call_id}`;
+  const p = `${args.source}:${EVENT_TYPE}`;
+  if (args.is_caliber) {
+    const phone10 = phoneLast10(args.caller_id);
+    if (phone10) return `${p}:${phone10}:${etDate(args.conversion_time)}`;
+    if (args.conversion_call_id) return `${p}:${args.conversion_call_id}`;
+    const click = args.gclid || args.gbraid || args.wbraid || "no_click";
+    return `${p}:${click}:${args.conversion_time.toISOString()}`;
   }
+  if (args.conversion_call_id) return `${p}:${args.conversion_call_id}`;
   const click = args.gclid || args.gbraid || args.wbraid || "no_click";
-  const ts = args.conversion_time.toISOString();
-  const val = args.conversion_value.toFixed(4);
-  return `${SOURCE}:${EVENT_TYPE}:${click}:${ts}:${val}`;
+  return `${p}:${click}:${args.conversion_time.toISOString()}:${args.conversion_value.toFixed(4)}`;
 }
 
 function normalizePhone(raw: string | null): string | null {
@@ -358,7 +398,16 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  const ringba_call_id = pick(merged, FIELD_VARIANTS.ringba_call_id);
+  // Caliber is detected by the PRESENCE of its `status` field, which Ringba/CallTools never
+  // send. Caliber rows are ingested (visible) but held OUT of Google upload by the export view
+  // until cutover (source <> 'caliber'); 'no connect' fires are dropped below before any dedup.
+  const CALL_STATUS_KEYS = ["status", "Status", "call_status", "callStatus"];
+  const is_caliber = CALL_STATUS_KEYS.some((k) =>
+    Object.prototype.hasOwnProperty.call(merged, k)
+  );
+  const source = is_caliber ? "caliber" : DEFAULT_SOURCE;
+
+  const conversion_call_id = pick(merged, FIELD_VARIANTS.conversion_call_id);
   const calltools_call_id = pick(merged, FIELD_VARIANTS.calltools_call_id);
   const caller_id = pick(merged, FIELD_VARIANTS.caller_id);
   const gclid = pick(merged, FIELD_VARIANTS.gclid);
@@ -388,6 +437,14 @@ Deno.serve(async (req: Request) => {
   const utm_campaign = pick(merged, FIELD_VARIANTS.utm_campaign);
   const utm_content = pick(merged, FIELD_VARIANTS.utm_content);
   const utm_term = pick(merged, FIELD_VARIANTS.utm_term);
+  const ib_source = pick(merged, FIELD_VARIANTS.ib_source);
+  const oppref = pick(merged, FIELD_VARIANTS.oppref);
+  const msclkid = pick(merged, FIELD_VARIANTS.msclkid);
+  const fbclid = pick(merged, FIELD_VARIANTS.fbclid);
+  const agent_name = pick(merged, FIELD_VARIANTS.agent_name);
+  const queue = pick(merged, FIELD_VARIANTS.queue);
+  const call_type = pick(merged, FIELD_VARIANTS.call_type);
+  const call_status = pick(merged, FIELD_VARIANTS.call_status);
 
   // Ingress filter: only NBA-publisher postbacks become rows.
   // Other publishers' postbacks are logged for audit then dropped — we don't
@@ -396,7 +453,7 @@ Deno.serve(async (req: Request) => {
   if ((publisher || "").trim().toUpperCase() !== "NBA") {
     await supabase.from("api_logs").insert({
       lead_id: null,
-      transaction_id: transaction_id || ringba_call_id || "ringba-unknown",
+      transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
       caller_id: caller_id || "",
       request_payload: { source: "ringba-webhook", raw: rawPayload } as object,
       response_payload: {
@@ -414,8 +471,28 @@ Deno.serve(async (req: Request) => {
     );
   }
 
+  // Caliber "no connect" fires are not real transfers/monetizations — drop them BEFORE dedup
+  // (owner's rule). Logged for visibility; no event row, so no derived transfer either.
+  if (is_caliber && call_status && /no[\s_-]*connect/i.test(call_status)) {
+    await supabase.from("api_logs").insert({
+      lead_id: null,
+      transaction_id: transaction_id || conversion_call_id || "caliber-unknown",
+      caller_id: caller_id || "",
+      request_payload: { source: "ringba-webhook", raw: rawPayload } as object,
+      response_payload: { skipped: true, reason: "caliber-no-connect", call_status } as object,
+      http_status: 200,
+      success: true,
+      error_message: null,
+    });
+    return new Response(
+      JSON.stringify({ ok: true, stored: false, skipped: "caliber-no-connect" }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   const dedupe_key = buildDedupeKey({
-    ringba_call_id,
+    source, is_caliber,
+    conversion_call_id, caller_id,
     gclid, gbraid, wbraid,
     conversion_time,
     conversion_value,
@@ -491,12 +568,12 @@ Deno.serve(async (req: Request) => {
     const { data: newRow, error: insertErr } = await supabase
       .from("offline_conversion_events")
       .insert({
-        source: SOURCE,
+        source,
         event_type: EVENT_TYPE,
         status,
         lead_id: match.lead_id,
         transaction_id: eff_transaction_id,
-        ringba_call_id,
+        conversion_call_id,
         calltools_call_id,
         caller_id,
         gclid: eff_gclid,
@@ -516,6 +593,14 @@ Deno.serve(async (req: Request) => {
         utm_campaign: eff_utm_campaign,
         utm_content: eff_utm_content,
         utm_term: eff_utm_term,
+        ib_source,
+        oppref,
+        msclkid,
+        fbclid,
+        agent_name,
+        queue,
+        call_type,
+        call_status,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
         google_ads_conversion_action_id:
           Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE") || null,
@@ -532,7 +617,7 @@ Deno.serve(async (req: Request) => {
       // retry against a bug it cannot fix.
       await supabase.from("api_logs").insert({
         lead_id: match.lead_id,
-        transaction_id: transaction_id || ringba_call_id || "ringba-unknown",
+        transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
         caller_id: caller_id || "",
         request_payload: rawPayload as object,
         response_payload: { error: insertErr.message } as object,
@@ -554,13 +639,13 @@ Deno.serve(async (req: Request) => {
   // same audit trail as CallTools outbound calls.
   await supabase.from("api_logs").insert({
     lead_id: match.lead_id,
-    transaction_id: transaction_id || ringba_call_id || "ringba-unknown",
+    transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
     caller_id: caller_id || "",
     request_payload: {
       source: "ringba-webhook",
       raw: rawPayload,
       parsed: {
-        ringba_call_id, gclid, gbraid, wbraid,
+        conversion_call_id, gclid, gbraid, wbraid,
         conversion_value, conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id,
       },

@@ -1,6 +1,6 @@
 // prune-sheet-rows-by-order-id
 //
-// Surgical cleanup tool: takes a list of Order IDs (ringba_call_id values)
+// Surgical cleanup tool: takes a list of Order IDs (conversion_call_id values)
 // and deletes the matching rows from the Google Sheet. Useful when bad data
 // slips into the Sheet and needs to be removed before Google Ads ingests it
 // (e.g. CallTools sending a UUID into Ringba's User:gclid tag, or any other
