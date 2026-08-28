@@ -327,17 +327,11 @@ async function matchLead(
   // phone whose digits resolve to the same E.164. This is best-effort and
   // deliberately last because callers often dial from an unrelated number.
   if (fields.caller_id) {
-    const e164 = normalizePhone(fields.caller_id);
-    if (e164) {
-      const tenDigits = e164.replace(/^\+1/, "");
-      const { data } = await supabase
-        .from("leads")
-        .select("id, phone")
-        .ilike("phone", `%${tenDigits}%`)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (data?.id) return { lead_id: data.id as string, matched_by: "caller_id" };
+    const digits = fields.caller_id.replace(/\D/g, "");
+    if (digits.length >= 10) {
+      // Exact normalized last-10 match via idx_leads_phone_last10 (not a substring ILIKE).
+      const { data } = await supabase.rpc("match_lead_id_by_phone10", { p10: digits.slice(-10) });
+      if (data) return { lead_id: data as string, matched_by: "caller_id" };
     }
   }
 
