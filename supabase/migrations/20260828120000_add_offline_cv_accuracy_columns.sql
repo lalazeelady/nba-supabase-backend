@@ -35,7 +35,10 @@ alter table public.offline_conversion_events
 
 alter table public.leads
   add column if not exists lead_source  text,
-  add column if not exists landing_page text;
+  add column if not exists landing_page text,
+  add column if not exists msclkid      text,   -- Bing click id
+  add column if not exists oppref       text,   -- OpenAI click id
+  add column if not exists fbclid       text;   -- Meta click id
 
 comment on column public.offline_conversion_events.ib_source is
   'Inbound route / source phone number (CallTools/Caliber). Drives the Google-upload source filter.';

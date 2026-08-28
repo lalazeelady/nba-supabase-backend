@@ -82,6 +82,7 @@ interface CaliberCallResult {
 
 async function postToCaliber(args: {
   phoneE164: string;
+  transactionId: string;
   payload: LeadPayload;
   clientIp: string;
   userAgent: string;
@@ -97,6 +98,9 @@ async function postToCaliber(args: {
   }
 
   const body = {
+    // Same transaction_id we store on the lead and send CallTools, so Caliber can echo it
+    // back on its conversion pixel → deterministic conversion↔lead matching (not phone-only).
+    transaction_id: args.transactionId || undefined,
     consent: {
       given: !!args.payload.tcpa_consent,
       timestamp: new Date().toISOString(),
@@ -128,6 +132,16 @@ async function postToCaliber(args: {
       utm_campaign: args.payload.utm_campaign || undefined,
       utm_content: args.payload.utm_content || undefined,
       utm_term: args.payload.utm_term || undefined,
+      // Click ids — MIRROR what we send CallTools so Caliber can carry them onto its
+      // conversion pixel. Each goes to its own field (no cross-type fallback). msclkid/oppref/
+      // fbclid are plumbed now; they arrive once the funnel captures them (later site task).
+      // Caliber drops unknown fields silently, so sending these is safe before it's configured.
+      gclid: args.payload.click_id || undefined,
+      wbraid: args.payload.wbraid || undefined,
+      gbraid: args.payload.gbraid || undefined,
+      msclkid: args.payload.msclkid || undefined,
+      oppref: args.payload.oppref || undefined,
+      fbclid: args.payload.fbclid || undefined,
     },
     extended: {
       // Per Caliber: unknown FIELDS are dropped, but bad VALUES on a known
@@ -262,9 +276,12 @@ interface LeadPayload {
   tcpa_consent: boolean;
   trusted_form_cert_url: string;
   age?: number;
-  click_id?: string;
+  click_id?: string;   // gclid
   wbraid?: string;
   gbraid?: string;
+  msclkid?: string;    // Bing
+  oppref?: string;     // OpenAI
+  fbclid?: string;     // Meta
   utm_source?: string;
   utm_medium?: string;
   utm_campaign?: string;
@@ -452,6 +469,9 @@ Deno.serve(async (req: Request) => {
         gclid: payload.click_id || null,
         wbraid: payload.wbraid || null,
         gbraid: payload.gbraid || null,
+        msclkid: payload.msclkid || null,
+        oppref: payload.oppref || null,
+        fbclid: payload.fbclid || null,
         utm_source: payload.utm_source || null,
         utm_medium: payload.utm_medium || null,
         utm_campaign: payload.utm_campaign || null,
@@ -529,6 +549,9 @@ Deno.serve(async (req: Request) => {
       gclid: payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
+      msclkid: payload.msclkid || "",
+      oppref: payload.oppref || "",
+      fbclid: payload.fbclid || "",
       utm_source: payload.utm_source || "",
       utm_medium: payload.utm_medium || "",
       utm_campaign: payload.utm_campaign || "",
@@ -648,6 +671,7 @@ Deno.serve(async (req: Request) => {
 
     const caliberPromise = postToCaliber({
       phoneE164: phoneFormatted,
+      transactionId,
       payload,
       clientIp,
       userAgent: req.headers.get("user-agent") || "",
