@@ -1,3 +1,3 @@
--- Caliber-derived transfers dedupe PER-CALL (conversion_call_id), matching caliber's per-call
--- CCO; CallTools interim stays phone/day. Applied live via MCP; kept here so git == prod.
--- (Function body identical to the applied version — see derive_transfer_caliber_per_call migration.)
+-- NOTE: superseded same day. Caliber-derived transfers reverted from per-call back to phone+ET-day
+-- (source-prefixed), matching the phone/day CCO. Final state applied live via MCP =
+-- derive_transfer_caliber_phone_day_restore. conversion_call_id stored as identifier only.

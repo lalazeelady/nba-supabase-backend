@@ -1,4 +1,3 @@
--- Caliber Order ID switched from phone/day to its PER-CALL call id (gross, same as Ringba),
--- per owner 2026-08-29. Removes the caliber phone/day branch so caliber falls through to the
--- normal conversion_call_id path. Applied live via MCP; kept here so git == prod.
--- (Function body identical to the applied version — see caliber_per_call_order_id migration.)
+-- NOTE: superseded same day. Caliber Order ID was briefly switched to per-call, then reverted
+-- to phone + ET-day per owner (call_id kept as a stored identifier, not the dedupe/Order-ID key).
+-- Final state applied live via MCP = caliber_phone_day_order_id_restore. Kept as a history marker.
