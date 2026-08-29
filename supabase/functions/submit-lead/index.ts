@@ -142,11 +142,11 @@ async function postToCaliber(args: {
       msclkid: args.payload.msclkid || undefined,
       oppref: args.payload.oppref || undefined,
       fbclid: args.payload.fbclid || undefined,
-      // Context + future placeholders (omitted when empty). `click_id` currently mirrors gclid;
-      // ttclid/li_fat_id/twclid/epik are plumbed for future sources we don't run traffic to yet.
+      // Context + future placeholders (omitted when empty). ttclid/li_fat_id/twclid/epik are
+      // plumbed for future sources we don't run traffic to yet. (click_id dropped — it just
+      // duplicated gclid; the field name stays reserved for future third-party integrations.)
       referrer: args.refererUrl || undefined,
       landing_page: args.payload.landing_page || undefined,
-      click_id: args.payload.click_id || undefined,
       ttclid: args.payload.ttclid || undefined,
       li_fat_id: args.payload.li_fat_id || undefined,
       twclid: args.payload.twclid || undefined,
