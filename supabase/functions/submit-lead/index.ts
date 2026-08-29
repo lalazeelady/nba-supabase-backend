@@ -88,13 +88,13 @@ async function postToCaliber(args: {
   userAgent: string;
   refererUrl: string;
 }): Promise<CaliberCallResult> {
-  // Direct API (no HMAC): auth is the Supabase anon key via apikey + Bearer. The HMAC signing
-  // path is Caliber's older method; the direct API is current and (per Caliber) removing HMAC
-  // is what lets our transaction_id echo back on the conversion pixel.
-  const anonKey = Deno.env.get("CALIBER_ANON_KEY") || "";
-  if (!anonKey) {
+  // Direct API (Caliber turned OFF HMAC 2026-08-29): authenticate with the key as a plain Bearer
+  // token. The value in CALIBER_HMAC_SECRET is now used as the API key, not a signing secret
+  // (verified: `Authorization: Bearer <that value>` -> 422 consent_required = auth passed).
+  const caliberKey = Deno.env.get("CALIBER_HMAC_SECRET") || "";
+  if (!caliberKey) {
     return {
-      status: 0, ok: false, body: null, error: "missing CALIBER_ANON_KEY",
+      status: 0, ok: false, body: null, error: "missing CALIBER_HMAC_SECRET (direct-API key)",
       derivedStatus: "skipped", leadId: null, action: null, requestBody: null,
     };
   }
@@ -174,8 +174,7 @@ async function postToCaliber(args: {
     const resp = await fetch(CALIBER_URL, {
       method: "POST",
       headers: {
-        "apikey": anonKey,
-        "Authorization": `Bearer ${anonKey}`,
+        "Authorization": `Bearer ${caliberKey}`,
         "Content-Type": "application/json",
         // Stable request id keyed off transaction_id so retries within 24h are
         // idempotent on Caliber's side.
