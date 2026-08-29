@@ -88,11 +88,13 @@ async function postToCaliber(args: {
   userAgent: string;
   refererUrl: string;
 }): Promise<CaliberCallResult> {
-  const secret = Deno.env.get("CALIBER_HMAC_SECRET") || "";
+  // Direct API (no HMAC): auth is the Supabase anon key via apikey + Bearer. The HMAC signing
+  // path is Caliber's older method; the direct API is current and (per Caliber) removing HMAC
+  // is what lets our transaction_id echo back on the conversion pixel.
   const anonKey = Deno.env.get("CALIBER_ANON_KEY") || "";
-  if (!secret || !anonKey) {
+  if (!anonKey) {
     return {
-      status: 0, ok: false, body: null, error: "missing CALIBER_HMAC_SECRET or CALIBER_ANON_KEY",
+      status: 0, ok: false, body: null, error: "missing CALIBER_ANON_KEY",
       derivedStatus: "skipped", leadId: null, action: null, requestBody: null,
     };
   }
@@ -107,10 +109,10 @@ async function postToCaliber(args: {
       ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
       user_agent: args.userAgent || undefined,
       url: args.refererUrl || undefined,
-      // Caliber consent field name kept as `jornaya_leadid` per Caliber API
-      // spec (renaming on our side would break their TCPA validation). The
-      // VALUE is now the TrustedForm cert URL going forward.
+      // jornaya_leadid retained (their config reads the TrustedForm URL here); the direct API
+      // also accepts a dedicated trustedform_cert_url field, so we send both.
       jornaya_leadid: args.payload.trusted_form_cert_url || undefined,
+      trustedform_cert_url: args.payload.trusted_form_cert_url || undefined,
     },
     contact: {
       first_name: args.payload.first_name || undefined,
@@ -132,25 +134,27 @@ async function postToCaliber(args: {
       utm_campaign: args.payload.utm_campaign || undefined,
       utm_content: args.payload.utm_content || undefined,
       utm_term: args.payload.utm_term || undefined,
-      // Click ids — MIRROR what we send CallTools so Caliber can carry them onto its
-      // conversion pixel. Each goes to its own field (no cross-type fallback). msclkid/oppref/
-      // fbclid are plumbed now; they arrive once the funnel captures them (later site task).
-      // Caliber drops unknown fields silently, so sending these is safe before it's configured.
-      gclid: args.payload.click_id || undefined,
+      // Click ids. gclid reads a real `gclid` field, falling back to the legacy `click_id`
+      // until the funnel sends gclid directly. msclkid/oppref/fbclid + ttclid/li_fat_id/twclid/
+      // epik are plumbed for future sources; omitted when empty.
+      gclid: args.payload.gclid || args.payload.click_id || undefined,
       wbraid: args.payload.wbraid || undefined,
       gbraid: args.payload.gbraid || undefined,
       msclkid: args.payload.msclkid || undefined,
       oppref: args.payload.oppref || undefined,
       fbclid: args.payload.fbclid || undefined,
-      // Context + future placeholders (omitted when empty). ttclid/li_fat_id/twclid/epik are
-      // plumbed for future sources we don't run traffic to yet. (click_id dropped — it just
-      // duplicated gclid; the field name stays reserved for future third-party integrations.)
-      referrer: args.refererUrl || undefined,
-      landing_page: args.payload.landing_page || undefined,
       ttclid: args.payload.ttclid || undefined,
       li_fat_id: args.payload.li_fat_id || undefined,
       twclid: args.payload.twclid || undefined,
       epik: args.payload.epik || undefined,
+      // Context + consent-mode (all omitted when empty; funnel captures click_timestamp +
+      // consent_ad_* later — required only for EU/UK, which NBA doesn't run).
+      referrer: args.refererUrl || undefined,
+      landing_page: args.payload.landing_page || undefined,
+      click_timestamp: args.payload.click_timestamp || undefined,
+      consent_ad_storage: args.payload.consent_ad_storage,
+      consent_ad_user_data: args.payload.consent_ad_user_data,
+      consent_ad_personalization: args.payload.consent_ad_personalization,
     },
     extended: {
       // Per Caliber: unknown FIELDS are dropped, but bad VALUES on a known
@@ -165,17 +169,14 @@ async function postToCaliber(args: {
   };
 
   const bodyStr = JSON.stringify(body);
-  const ts = new Date().toISOString();
-  const signature = "sha256=" + await hmacSha256Hex(secret, `${ts}.${bodyStr}`);
 
   try {
     const resp = await fetch(CALIBER_URL, {
       method: "POST",
       headers: {
         "apikey": anonKey,
+        "Authorization": `Bearer ${anonKey}`,
         "Content-Type": "application/json",
-        "x-timestamp": ts,
-        "x-signature": signature,
         // Stable request id keyed off transaction_id so retries within 24h are
         // idempotent on Caliber's side.
         "x-request-id": `nba-submit-lead-${args.payload.transaction_id}`,
@@ -285,7 +286,8 @@ interface LeadPayload {
   tcpa_consent: boolean;
   trusted_form_cert_url: string;
   age?: number;
-  click_id?: string;   // gclid
+  gclid?: string;      // preferred gclid field (funnel to send directly)
+  click_id?: string;   // legacy gclid carrier (fallback until funnel sends gclid)
   wbraid?: string;
   gbraid?: string;
   msclkid?: string;    // Bing
@@ -297,6 +299,10 @@ interface LeadPayload {
   li_fat_id?: string;  // LinkedIn
   twclid?: string;     // X/Twitter
   epik?: string;       // Pinterest
+  click_timestamp?: string;              // initial landing time (ISO-8601 UTC)
+  consent_ad_storage?: boolean;          // Consent Mode v2 (EU/UK; NBA US, usually absent)
+  consent_ad_user_data?: boolean;
+  consent_ad_personalization?: boolean;
   utm_source?: string;
   utm_medium?: string;
   utm_campaign?: string;
@@ -481,7 +487,7 @@ Deno.serve(async (req: Request) => {
         ip_address: clientIp,
         trusted_form_cert_url: payload.trusted_form_cert_url || "STATIC_JORNAYA_ID_PLACEHOLDER",
         crm_status: "pending",
-        gclid: payload.click_id || null,
+        gclid: payload.gclid || payload.click_id || null,
         wbraid: payload.wbraid || null,
         gbraid: payload.gbraid || null,
         msclkid: payload.msclkid || null,
@@ -561,7 +567,7 @@ Deno.serve(async (req: Request) => {
       // CallTools side is configured to receive it under that name. The VALUE
       // is now the TrustedForm cert URL going forward.
       jornaya_lead_id: payload.trusted_form_cert_url || "",
-      gclid: payload.click_id || "",
+      gclid: payload.gclid || payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
       msclkid: payload.msclkid || "",

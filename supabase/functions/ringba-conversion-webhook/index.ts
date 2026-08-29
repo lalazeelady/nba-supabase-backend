@@ -237,9 +237,11 @@ function buildDedupeKey(args: {
 }): string {
   const p = `${args.source}:${EVENT_TYPE}`;
   if (args.is_caliber) {
+    // Caliber is GROSS per-call on its call id (matches Ringba). Phone/day + click:time are
+    // fallbacks only when the call id is absent.
+    if (args.conversion_call_id) return `${p}:${args.conversion_call_id}`;
     const phone10 = phoneLast10(args.caller_id);
     if (phone10) return `${p}:${phone10}:${etDate(args.conversion_time)}`;
-    if (args.conversion_call_id) return `${p}:${args.conversion_call_id}`;
     const click = args.gclid || args.gbraid || args.wbraid || "no_click";
     return `${p}:${click}:${args.conversion_time.toISOString()}`;
   }
