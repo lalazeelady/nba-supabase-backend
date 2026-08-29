@@ -632,6 +632,7 @@ Deno.serve(async (req: Request) => {
   // Cross-cutting log to api_logs so Ringba inbound calls show up in the
   // same audit trail as CallTools outbound calls.
   await supabase.from("api_logs").insert({
+    api_type: is_caliber ? "cv-internet-caliber" : "cv-cco-ringba",
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
     caller_id: caller_id || "",

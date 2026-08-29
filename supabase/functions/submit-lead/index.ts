@@ -142,6 +142,15 @@ async function postToCaliber(args: {
       msclkid: args.payload.msclkid || undefined,
       oppref: args.payload.oppref || undefined,
       fbclid: args.payload.fbclid || undefined,
+      // Context + future placeholders (omitted when empty). `click_id` currently mirrors gclid;
+      // ttclid/li_fat_id/twclid/epik are plumbed for future sources we don't run traffic to yet.
+      referrer: args.refererUrl || undefined,
+      landing_page: args.payload.landing_page || undefined,
+      click_id: args.payload.click_id || undefined,
+      ttclid: args.payload.ttclid || undefined,
+      li_fat_id: args.payload.li_fat_id || undefined,
+      twclid: args.payload.twclid || undefined,
+      epik: args.payload.epik || undefined,
     },
     extended: {
       // Per Caliber: unknown FIELDS are dropped, but bad VALUES on a known
@@ -282,6 +291,12 @@ interface LeadPayload {
   msclkid?: string;    // Bing
   oppref?: string;     // OpenAI
   fbclid?: string;     // Meta
+  // Future click-id placeholders — not captured from the funnel today (no traffic to these
+  // sources yet). Plumbed so Caliber has the fields when/if we do. Blank -> omitted.
+  ttclid?: string;     // TikTok
+  li_fat_id?: string;  // LinkedIn
+  twclid?: string;     // X/Twitter
+  epik?: string;       // Pinterest
   utm_source?: string;
   utm_medium?: string;
   utm_campaign?: string;
@@ -688,6 +703,7 @@ Deno.serve(async (req: Request) => {
     const errorMessage = crmResult.error;
 
     await supabase.from("api_logs").insert({
+      api_type: "lead-to-ct",
       lead_id: leadData.id,
       transaction_id: transactionId,
       caller_id: phoneFormatted,
@@ -701,6 +717,7 @@ Deno.serve(async (req: Request) => {
     // Separate api_logs row for Caliber so the audit trail per provider is
     // clean and we can filter on response_payload.provider downstream.
     await supabase.from("api_logs").insert({
+      api_type: "lead-to-caliber",
       lead_id: leadData.id,
       transaction_id: transactionId,
       caller_id: phoneFormatted,

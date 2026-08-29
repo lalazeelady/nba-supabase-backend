@@ -495,6 +495,7 @@ Deno.serve(async (req: Request) => {
   }
 
   await supabase.from("api_logs").insert({
+    api_type: "cv-xfr-ringba",
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
     caller_id: caller_id || "",

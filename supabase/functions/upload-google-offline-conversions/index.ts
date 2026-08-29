@@ -419,6 +419,7 @@ async function logAttempt(
   supabase: ReturnType<typeof createClient>, eventId: string, providerName: string, outcome: unknown, success: boolean,
 ) {
   await supabase.from("api_logs").insert({
+    api_type: "cv-upload",
     lead_id: null,
     transaction_id: `offline-conversion:${eventId}`,
     caller_id: "",
