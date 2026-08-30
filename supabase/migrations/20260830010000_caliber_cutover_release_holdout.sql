@@ -1,0 +1,7 @@
+-- CALIBER CUTOVER 2026-08-30: release the upload hold-out for NEW caliber (source='caliber',
+-- stamped by ringba-conversion-webhook v39+), while STILL holding the HISTORICAL mislabeled
+-- caliber rows (source='ringba' + raw_payload ? 'status') so they don't flood-upload and
+-- double-count the window CallTools already covered. Source filter + identifiers unchanged.
+-- (Full CREATE OR REPLACE VIEW applied live via MCP = source of truth; predicate changed from
+--  `source <> 'caliber' AND not(raw_payload ? 'status')` to
+--  `not (source = 'ringba' AND raw_payload ? 'status')`.)
