@@ -79,6 +79,13 @@ const FIELD_VARIANTS = {
   caller_last_name: ["last_name", "lastName", "lname", "last"],
   caller_zip: ["zip", "zip_code", "zipCode", "postal_code", "postalCode"],
   caller_state: ["state", "region", "regionCode", "region_code"],
+  // Ringba sends `address` and `ip_address` on every postback; neither had a
+  // variant list, so both were readable only via raw_payload. `city` and
+  // `user_agent` are plumbed for the pixel-token additions in CONFIG-TODO.md.
+  caller_address: ["address", "street", "street_address", "streetAddress", "address1"],
+  caller_city: ["city", "City", "caller_city", "callerCity"],
+  ip_address: ["ip_address", "ipAddress", "ip", "client_ip", "clientIp"],
+  user_agent: ["user_agent", "userAgent", "ua"],
   publisher: [
     "pub", "Pub",
     "publisher", "Publisher", "publisher_name", "publisherName",
@@ -211,6 +218,10 @@ type LeadAttr = {
   utm_campaign: string | null;
   utm_content: string | null;
   utm_term: string | null;
+  street_address: string | null;
+  city: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
 };
 
 async function matchLead(
@@ -335,6 +346,10 @@ Deno.serve(async (req: Request) => {
   const caller_last_name = pick(merged, FIELD_VARIANTS.caller_last_name);
   const caller_zip = pick(merged, FIELD_VARIANTS.caller_zip);
   const caller_state = pick(merged, FIELD_VARIANTS.caller_state);
+  const caller_address = pick(merged, FIELD_VARIANTS.caller_address);
+  const caller_city = pick(merged, FIELD_VARIANTS.caller_city);
+  const ip_address = pick(merged, FIELD_VARIANTS.ip_address);
+  const user_agent = pick(merged, FIELD_VARIANTS.user_agent);
   const publisher = pick(merged, FIELD_VARIANTS.publisher);
   const utm_source = pick(merged, FIELD_VARIANTS.utm_source);
   const utm_medium = pick(merged, FIELD_VARIANTS.utm_medium);
@@ -388,7 +403,7 @@ Deno.serve(async (req: Request) => {
   if (match.lead_id) {
     const { data } = await supabase
       .from("leads")
-      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, street_address, city, ip_address, user_agent")
       .eq("id", match.lead_id)
       .maybeSingle();
     leadAttr = (data as unknown as LeadAttr) ?? null;
@@ -404,6 +419,13 @@ Deno.serve(async (req: Request) => {
   const eff_utm_campaign = nz(utm_campaign) ?? nz(leadAttr?.utm_campaign) ?? null;
   const eff_utm_content = nz(utm_content) ?? nz(leadAttr?.utm_content) ?? null;
   const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
+  // Caller context. The Ringba pixel's ip_address token resolves empty today
+  // (CallTools has no ip_address on the contact for the enrich URL to read), so
+  // in practice these come from the matched lead until CONFIG-TODO.md is done.
+  const eff_caller_address = nz(caller_address) ?? nz(leadAttr?.street_address) ?? null;
+  const eff_caller_city = nz(caller_city) ?? nz(leadAttr?.city) ?? null;
+  const eff_ip_address = nz(ip_address) ?? nz(leadAttr?.ip_address) ?? null;
+  const eff_user_agent = nz(user_agent) ?? nz(leadAttr?.user_agent) ?? null;
 
   const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
   // ECL-eligible: matched lead OR the postback forwarded enough PII. Value is
@@ -449,6 +471,10 @@ Deno.serve(async (req: Request) => {
         caller_last_name,
         caller_zip,
         caller_state,
+        caller_address: eff_caller_address,
+        caller_city: eff_caller_city,
+        ip_address: eff_ip_address,
+        user_agent: eff_user_agent,
         publisher,
         ib_source,
         oppref,

@@ -87,6 +87,11 @@ async function postToCaliber(args: {
   clientIp: string;
   userAgent: string;
   refererUrl: string;
+  // The single consent timestamp for this submission. Passed in (rather than
+  // generated here) so leads.consent_timestamp and the value Caliber records
+  // are the same instant — previously Caliber got a timestamp we never kept.
+  consentTimestamp: string;
+  needs: string;
 }): Promise<CaliberCallResult> {
   // Direct API (Caliber turned OFF HMAC 2026-08-29): authenticate with the key as a plain Bearer
   // token. The value in CALIBER_HMAC_SECRET is now used as the API key, not a signing secret
@@ -105,7 +110,7 @@ async function postToCaliber(args: {
     transaction_id: args.transactionId || undefined,
     consent: {
       given: !!args.payload.tcpa_consent,
-      timestamp: new Date().toISOString(),
+      timestamp: args.consentTimestamp,
       ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
       user_agent: args.userAgent || undefined,
       url: args.refererUrl || undefined,
@@ -165,6 +170,9 @@ async function postToCaliber(args: {
       citizenship: mapCitizenshipToCaliber(args.payload.citizenship),
       employment_status: mapEmploymentStatusToCaliber(args.payload.employment_status),
       annual_household_income_range: mapAnnualIncomeToCaliber(args.payload.annual_income),
+      // Benefit interests picked on the funnel landing page. Free text, so an
+      // unrecognized field name is dropped rather than 400ing the request.
+      needs: args.needs || undefined,
     },
   };
 
@@ -309,6 +317,18 @@ interface LeadPayload {
   utm_term?: string;
   lead_source?: string;   // explicit source override (funnel-supplied, later)
   landing_page?: string;  // landing-page id: apply1 / apply2 / info01 / ... (funnel-supplied, later)
+  // Benefit interests from the landing-page tiles (food / utility / housing /
+  // other). Collected into sessionStorage on every funnel today; the funnel
+  // starts posting it in the matching site-repo change. Array or CSV string.
+  needs?: string[] | string;
+  // Publisher / sub-publisher identity, mirroring Ringba's Publisher:Name tag.
+  publisher?: string;
+  // Consent moment supplied by the funnel; falls back to submission time.
+  consent_timestamp?: string;
+  // Anti-bot time-trap, read off the payload below via `formDuration`. Declared
+  // here so it stops being an untyped `as any` read.
+  form_duration_ms?: number;
+  hp_website?: string;
 }
 
 // Best-effort lead source from utm_source until the funnel sends an explicit lead_source.
@@ -321,6 +341,24 @@ function deriveLeadSource(utmSource?: string): string | null {
   if (s.includes("openai") || s.includes("chatgpt")) return "openai";
   if (s.includes("facebook") || s.includes("meta") || s.includes("fb")) return "meta";
   return s;
+}
+
+// `needs` arrives as an array from the funnel. Store and forward it comma-joined
+// so it survives query-string postbacks and the Sheet export unchanged, and so a
+// single scalar column serves both CRMs.
+function normalizeNeeds(raw: string[] | string | undefined): string {
+  if (Array.isArray(raw)) {
+    return raw.map((n) => String(n).trim()).filter(Boolean).join(",");
+  }
+  return (raw || "").trim();
+}
+
+// Parse a funnel-supplied timestamp into an ISO string, or null when absent or
+// unparseable — never let a malformed value fail the insert.
+function toIsoOrNull(raw: string | undefined): string | null {
+  if (!raw || !String(raw).trim()) return null;
+  const d = new Date(String(raw).trim());
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 Deno.serve(async (req: Request) => {
@@ -349,8 +387,8 @@ Deno.serve(async (req: Request) => {
       "unknown";
 
     // --- Bot detection: honeypot field + time-trap ---
-    const hpWebsite = (payload as any).hp_website || "";
-    const formDuration = (payload as any).form_duration_ms ?? 0;
+    const hpWebsite = payload.hp_website || "";
+    const formDuration = payload.form_duration_ms ?? 0;
     const isBotSuspected = hpWebsite.length > 0 || formDuration < 3000;
 
     if (isBotSuspected) {
@@ -465,6 +503,17 @@ Deno.serve(async (req: Request) => {
     }
     const ageToStore = (typeof payload.age === "number" ? payload.age : computedAge) ?? null;
 
+    // Session context: read from request headers on every submission. These were
+    // handed to Caliber's consent block and then discarded; now they are persisted
+    // (our own TCPA evidence trail, and user_agent is a valid Enhanced Conversions
+    // signal for Google).
+    const userAgent = req.headers.get("user-agent") || "";
+    const refererUrl = req.headers.get("referer") || "";
+
+    // One consent timestamp per submission, shared by the leads row and Caliber.
+    const consentTimestamp = toIsoOrNull(payload.consent_timestamp) ?? new Date().toISOString();
+    const needs = normalizeNeeds(payload.needs);
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
@@ -504,6 +553,22 @@ Deno.serve(async (req: Request) => {
           || deriveLeadSource(payload.utm_source)
           || null,
         landing_page: (payload.landing_page && String(payload.landing_page).trim()) || null,
+        // Click ids the funnel already captures. They reached Caliber but had no
+        // column here, so they were dropped at the insert.
+        ttclid: payload.ttclid || null,
+        li_fat_id: payload.li_fat_id || null,
+        twclid: payload.twclid || null,
+        epik: payload.epik || null,
+        // Session + consent context.
+        user_agent: userAgent || null,
+        referrer: refererUrl || null,
+        consent_timestamp: consentTimestamp,
+        click_timestamp: toIsoOrNull(payload.click_timestamp),
+        // Retained for accepted leads too, not just bot_drops — it is what lets us
+        // reconstruct how long the form actually took.
+        form_duration_ms: typeof formDuration === "number" ? formDuration : null,
+        needs: needs || null,
+        publisher: (payload.publisher && String(payload.publisher).trim()) || null,
       })
       .select()
       .single();
@@ -577,6 +642,22 @@ Deno.serve(async (req: Request) => {
       utm_campaign: payload.utm_campaign || "",
       utm_content: payload.utm_content || "",
       utm_term: payload.utm_term || "",
+      // Fields CallTools did not previously receive. CallTools silently ignores a
+      // field it has no mapping for, so sending them is safe before the matching
+      // custom fields exist in the account — and they start landing the moment
+      // they do. Critically, the CallTools contact is what the Ringba enrich URL
+      // reads from ({{%locals[contact][<field>]}}), so anything missing here can
+      // never reach Ringba: this is the prerequisite for the postback gaps.
+      landing_page: payload.landing_page || "",
+      ip_address: clientIp !== "unknown" ? clientIp : "",
+      user_agent: userAgent,
+      referrer: refererUrl,
+      needs: needs,
+      pubid: payload.publisher || "",
+      ttclid: payload.ttclid || "",
+      li_fat_id: payload.li_fat_id || "",
+      twclid: payload.twclid || "",
+      epik: payload.epik || "",
       status: "new",
       do_not_contact: false,
       add_tags: [268591],
@@ -694,8 +775,10 @@ Deno.serve(async (req: Request) => {
       transactionId,
       payload,
       clientIp,
-      userAgent: req.headers.get("user-agent") || "",
-      refererUrl: req.headers.get("referer") || "",
+      userAgent,
+      refererUrl,
+      consentTimestamp,
+      needs,
     });
 
     const [crmResult, caliberResult] = await Promise.all([calltoolsPromise, caliberPromise]);
