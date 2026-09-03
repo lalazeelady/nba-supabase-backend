@@ -687,6 +687,28 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // --- 4xx fallback body -------------------------------------------------
+    // Every field name above that is NEW (either newly sent, or renamed to match
+    // the contact schema we read off the API response echo) carries a small risk:
+    // if CallTools treats one as a constrained enum rather than free text, it
+    // answers 400 and — since 4xx is deliberately not retried — the lead is lost.
+    // That is not an acceptable trade for an attribution improvement.
+    //
+    // So we keep a fallback: the exact field set that has been posting
+    // successfully for months. On a 4xx we retry ONCE with it. Worst case we lose
+    // the new fields on that lead; we never lose the lead. This also makes the
+    // CallTools custom-field rollout in CONFIG-TODO.md safe to do live.
+    const NEW_CRM_FIELDS = [
+      "employment", "oppref_id", "trusted_form", "consent_url",
+      "landing_page", "ip_address", "user_agent", "referrer", "needs", "pubid",
+      "ttclid", "li_fat_id", "twclid", "epik",
+    ];
+    const crmBodySafe: Record<string, unknown> = { ...crmBody };
+    for (const k of NEW_CRM_FIELDS) delete crmBodySafe[k];
+    // Restore the pre-branch name so the fallback is byte-for-byte the old payload.
+    if (payload.employment_status) crmBodySafe.employment_status = payload.employment_status;
+    if (payload.oppref) crmBodySafe.oppref = payload.oppref;
+
     const crmUrl = "https://app.calltools.io/api/contacts/";
 
     console.log("CRM Request URL:", crmUrl);
@@ -716,8 +738,12 @@ Deno.serve(async (req: Request) => {
       let error: string | null = null;
       const MAX_ATTEMPTS = 3;
       const ATTEMPT_TIMEOUT_MS = 10000;
+      // Swapped to crmBodySafe after a 4xx (once). See the note above crmBodySafe.
+      let usingSafeBody = false;
+      let attemptsUsed = 0;
 
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attemptsUsed = attempt;
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), ATTEMPT_TIMEOUT_MS);
         try {
@@ -727,7 +753,7 @@ Deno.serve(async (req: Request) => {
               "Authorization": `Token ${calltoolsToken}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify(crmBody),
+            body: JSON.stringify(usingSafeBody ? crmBodySafe : crmBody),
             signal: ac.signal,
           });
           status = result.status;
@@ -759,8 +785,20 @@ Deno.serve(async (req: Request) => {
           // Non-2xx. Capture the actual body (HTML error page or JSON string)
           // so api_logs/the alert show what CallTools really returned.
           error = `CallTools HTTP ${status}: ${rawBody.slice(0, 300)}`;
-          // Only retry 5xx (transient server-side). 4xx is our request's fault.
-          if (status < 500) break;
+          // 4xx is our request's fault, so a plain retry is pointless — but a
+          // retry with the known-good field set is not. Do that once, then stop.
+          if (status < 500) {
+            if (!usingSafeBody) {
+              console.warn("CallTools 4xx; retrying once with the pre-branch field set:", error);
+              usingSafeBody = true;
+              // Don't let the fallback consume a retry slot — otherwise a 4xx
+              // arriving on the final attempt would set the flag and never use
+              // it. Can only happen once, since usingSafeBody is now true.
+              attempt--;
+              continue;
+            }
+            break;
+          }
         } catch (e) {
           // Network-level error, or our per-attempt timeout fired (AbortError).
           console.error("CRM API error:", e);
@@ -780,7 +818,7 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      return { success, response, status, leadId, action, error };
+      return { success, response, status, leadId, action, error, usedSafeBody: usingSafeBody, attempts: attemptsUsed };
     })();
 
     const caliberPromise = postToCaliber({
@@ -808,8 +846,10 @@ Deno.serve(async (req: Request) => {
       lead_id: leadData.id,
       transaction_id: transactionId,
       caller_id: phoneFormatted,
-      request_payload: crmBody,
-      response_payload: crmResponse,
+      request_payload: crmResult.usedSafeBody ? crmBodySafe : crmBody,
+      response_payload: crmResult.usedSafeBody
+        ? { ...(crmResponse as object || {}), _nba_note: "retried without new fields after a 4xx" }
+        : crmResponse,
       http_status: crmStatus,
       success: crmSuccess,
       error_message: errorMessage,
