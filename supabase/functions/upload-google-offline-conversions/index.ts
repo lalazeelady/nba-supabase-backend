@@ -11,6 +11,12 @@
 //                                           (falls back to legacy GOOGLE_DATA_MANAGER_DESTINATION_ID)
 //   CallXfer           (transfers)       -> GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLXFER
 //
+// Test escape hatch: GOOGLE_DATA_MANAGER_DESTINATION_ID_TEST_OVERRIDE. Normally UNSET
+//   (zero behavior change). When set, monetized-call events route there instead of the
+//   real CallConvertOffline action — for re-validating the pipeline without writing to
+//   the live action. Transfers are never overridden. pipeline-health-check alerts while
+//   this is set, so it can't be left on by accident.
+//
 // Selection:
 //   status IN ('monetize_ready','ready_to_upload','transfer_ready')  -- CCO + CallXfer;
 //     'ready_to_upload' is the pre-rename alias, still accepted during the deploy window.
@@ -271,8 +277,10 @@ function destinationFor(conversionName: string | null): string {
   if ((conversionName || "").trim() === "CallXfer") {
     return Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLXFER") || "";
   }
-  // CallConvertOffline (monetized): new name, falling back to the legacy env.
-  return Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLMONETIZE") ||
+  // CallConvertOffline (monetized). TEST_OVERRIDE wins when set (see header); otherwise
+  // the real CCO destination, falling back to the legacy single-destination env.
+  return Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_TEST_OVERRIDE") ||
+    Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLMONETIZE") ||
     Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID") || "";
 }
 

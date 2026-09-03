@@ -1,23 +1,36 @@
 // pipeline-health-check
 //
-// Guards against the Aug-2026 silent outage: both offline-conversion delivery
-// paths (sync-google-sheet, upload-google-offline-conversions) 500'd internally
-// for days while the pg_cron jobs kept reporting "succeeded" (net.http_post only
-// dispatches — it can't see the function's 500). Nothing alerted because the
-// failing SELECT never reached the code that flips rows to `failed` / emails.
+// Guards against the Aug-2026 silent outage: the offline-conversion delivery path
+// 500'd internally for days while the pg_cron job kept reporting "succeeded"
+// (net.http_post only dispatches — it can't see the function's 500). Nothing
+// alerted because the failing SELECT never reached the code that flips rows to
+// `failed` / emails.
 //
-// This check reads the BASE TABLE directly (never the export view, so it can't be
-// taken down by the same view-timeout that caused the outage) and emails on a
-// stall: eligible rows that should have been delivered a while ago but weren't,
-// AND no successful delivery on that path in the last hour.
+// SCOPE (post Sheet->API cutover, 2026-09): the Google Sheet path is retired.
+// `sync-google-sheet-15min` (cron jobid 3) is unscheduled and Google Ads no longer
+// imports the Sheet, so `sheet_synced_at` intentionally stops filling and a Sheet
+// backlog is EXPECTED, not a fault. Watching it here would have produced a false
+// "stalled" email every hour, forever. The Data Manager API is now the sole path,
+// so this check watches only that. (To restore Sheet monitoring during a rollback,
+// see docs/offline-cv-accuracy/SHEET-TO-API-READY.md — reinstate `countBacklog`
+// with `sheet_synced_at IS NULL` and `lastSuccess("sheet_synced_at")`.)
 //
-// Signals (per path):
-//   Sheet: rows with sheet_synced_at IS NULL, status in the ready set, publisher
-//          NBA, created > STALL_GRACE ago  ->  should already be on the Sheet.
-//   API:   rows in the ready set, uploaded_at IS NULL, conversion_time <= 85d,
-//          upload_attempts < 6, created > STALL_GRACE ago  ->  should be uploaded.
-// A path is "stalled" when its backlog exceeds BACKLOG_THRESHOLD *and* its most
-// recent success (max sheet_synced_at / max uploaded_at) is older than SUCCESS_SLA.
+// Two independent failure modes are checked:
+//
+//   1. STALL — rows in the ready set that should have been delivered a while ago
+//      but weren't (uploaded_at IS NULL, conversion_time <= 85d, attempts < cap,
+//      created > STALL_GRACE ago), AND no successful upload in the last hour.
+//      Reads the BASE TABLE directly, never the export view, so it can't be taken
+//      down by the same view-timeout that caused the outage.
+//
+//   2. MISCONFIG — the uploader is running but wired so nothing (or the wrong
+//      thing) reaches Google. This is the failure mode a backlog check CANNOT see:
+//      with GOOGLE_UPLOAD_ENABLED unset the uploader silently falls back to
+//      dry_run, marks rows attempted, and the backlog stays flat while Google
+//      receives zero conversions. Likewise a missing destination id silently
+//      skips every event, and a left-on TEST_OVERRIDE quietly sends monetized
+//      calls to the test action instead of CallConvertOffline. Secret VALUES are
+//      never emailed — only set/unset plus a last-4 fingerprint.
 //
 // Auth (inbound): shared secret in `x-invoke-secret` (UPLOADER_INVOKE_SECRET).
 // Query params: ?dry_run=true (compute + return, never email) | ?force=true (email
@@ -34,42 +47,116 @@ const corsHeaders = {
 };
 
 const READY_STATUSES = ["monetize_ready", "ready_to_upload", "transfer_ready"];
-const STALL_GRACE_MIN = 90;      // a row older than this should already be delivered (crons run /15min)
-const SUCCESS_SLA_MIN = 60;      // no success on a path in this long (with backlog) => stalled
+const STALL_GRACE_MIN = 90;      // a row older than this should already be delivered (cron runs /15min)
+const SUCCESS_SLA_MIN = 60;      // no success on the path in this long (with backlog) => stalled
 const BACKLOG_THRESHOLD = 50;    // ignore tiny transient backlogs (~1-2 cycles of volume)
+const AGE_DAYS = 85;             // matches the uploader's Google 90-day cutoff
 const ALERT_TO = "larazielin1@gmail.com";
 
-async function countBacklog(
+// Report a secret as set/unset with a last-4 fingerprint — enough to tell two
+// destination ids apart in an email without disclosing either one.
+function fingerprint(v: string): string {
+  return v ? `set(…${v.slice(-4)})` : "UNSET";
+}
+
+interface ConfigAudit {
+  ok: boolean;
+  problems: string[];
+  snapshot: Record<string, unknown>;
+}
+
+// Mirrors upload-google-offline-conversions' own env reads (selectProvider +
+// destinationFor). Supabase secrets are project-wide, so this function sees the
+// exact same values the uploader does.
+function auditConfig(): ConfigAudit {
+  const uploadEnabled = (Deno.env.get("GOOGLE_UPLOAD_ENABLED") || "false").toLowerCase() === "true";
+  const provider = (Deno.env.get("GOOGLE_UPLOAD_PROVIDER") || "dry_run").toLowerCase();
+  const ccoDest = Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLMONETIZE") ||
+    Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID") || "";
+  const xferDest = Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLXFER") || "";
+  const testOverride = Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_TEST_OVERRIDE") || "";
+  const oauthConfigured = Boolean(
+    Deno.env.get("GOOGLE_CLIENT_ID") &&
+    Deno.env.get("GOOGLE_CLIENT_SECRET") &&
+    Deno.env.get("GOOGLE_REFRESH_TOKEN"),
+  );
+
+  const problems: string[] = [];
+  if (!uploadEnabled) {
+    problems.push(
+      "GOOGLE_UPLOAD_ENABLED is not 'true' — the uploader has silently fallen back to dry_run. " +
+      "Rows are being marked as attempted but NOTHING is reaching Google Ads.",
+    );
+  }
+  if (provider !== "data_manager") {
+    problems.push(
+      `GOOGLE_UPLOAD_PROVIDER="${provider}" — expected "data_manager". The uploader falls back to dry_run.`,
+    );
+  }
+  if (!ccoDest) {
+    problems.push(
+      "No CallConvertOffline destination id (GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLMONETIZE) — " +
+      "every monetized-call event is being skipped as skipped_no_destination.",
+    );
+  }
+  if (!xferDest) {
+    problems.push(
+      "No CallXfer destination id (GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLXFER) — " +
+      "every transfer event is being skipped as skipped_no_destination.",
+    );
+  }
+  if (!oauthConfigured) {
+    problems.push(
+      "Google OAuth secrets incomplete (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN) — " +
+      "token refresh fails and every upload retries until it hits the attempt cap, then goes to 'failed'.",
+    );
+  }
+  if (testOverride) {
+    problems.push(
+      "GOOGLE_DATA_MANAGER_DESTINATION_ID_TEST_OVERRIDE is SET — monetized calls are going to the " +
+      "TEST action, not the real CallConvertOffline action. Unset it to resume normal delivery.",
+    );
+  }
+
+  return {
+    ok: problems.length === 0,
+    problems,
+    snapshot: {
+      upload_enabled: uploadEnabled,
+      provider,
+      callmonetize_destination: fingerprint(ccoDest),
+      callxfer_destination: fingerprint(xferDest),
+      test_override: fingerprint(testOverride),
+      oauth_configured: oauthConfigured,
+    },
+  };
+}
+
+async function apiBacklogCount(
   supabase: ReturnType<typeof createClient>,
-  which: "sheet" | "api",
   graceIso: string,
   ageCutoffIso: string,
 ): Promise<number> {
-  let q = supabase.from("offline_conversion_events")
+  const { count, error } = await supabase.from("offline_conversion_events")
     .select("id", { count: "exact", head: true })
     .eq("publisher", "NBA")
     .in("status", READY_STATUSES)
-    .lt("created_at", graceIso);
-  if (which === "sheet") {
-    q = q.is("sheet_synced_at", null);
-  } else {
-    q = q.is("uploaded_at", null)
-      .gte("conversion_time", ageCutoffIso)
-      .lt("upload_attempts", 6);
-  }
-  const { count, error } = await q;
-  if (error) throw new Error(`backlog(${which}): ${error.message}`);
+    .lt("created_at", graceIso)
+    .is("uploaded_at", null)
+    .gte("conversion_time", ageCutoffIso)
+    .lt("upload_attempts", 6);
+  if (error) throw new Error(`backlog(api): ${error.message}`);
   return count ?? 0;
 }
 
-async function lastSuccess(
+async function lastUploadSuccess(
   supabase: ReturnType<typeof createClient>,
-  col: "sheet_synced_at" | "uploaded_at",
 ): Promise<string | null> {
   const { data, error } = await supabase.from("offline_conversion_events")
-    .select(col).not(col, "is", null).order(col, { ascending: false }).limit(1);
-  if (error) throw new Error(`lastSuccess(${col}): ${error.message}`);
-  return (data && data[0] ? (data[0] as Record<string, string>)[col] : null) ?? null;
+    .select("uploaded_at").not("uploaded_at", "is", null)
+    .order("uploaded_at", { ascending: false }).limit(1);
+  if (error) throw new Error(`lastSuccess(uploaded_at): ${error.message}`);
+  return (data && data[0] ? (data[0] as Record<string, string>).uploaded_at : null) ?? null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -94,37 +181,43 @@ Deno.serve(async (req: Request) => {
   const now = Date.now();
   const graceIso = new Date(now - STALL_GRACE_MIN * 60000).toISOString();
   const slaIso = new Date(now - SUCCESS_SLA_MIN * 60000).toISOString();
-  const ageCutoffIso = new Date(now - 85 * 86400000).toISOString();
+  const ageCutoffIso = new Date(now - AGE_DAYS * 86400000).toISOString();
 
   let report: Record<string, unknown>;
   try {
-    const [sheetBacklog, apiBacklog, lastSheet, lastUpload] = await Promise.all([
-      countBacklog(supabase, "sheet", graceIso, ageCutoffIso),
-      countBacklog(supabase, "api", graceIso, ageCutoffIso),
-      lastSuccess(supabase, "sheet_synced_at"),
-      lastSuccess(supabase, "uploaded_at"),
+    const config = auditConfig();
+    const [backlog, lastUpload] = await Promise.all([
+      apiBacklogCount(supabase, graceIso, ageCutoffIso),
+      lastUploadSuccess(supabase),
     ]);
 
-    const sheetStalled = sheetBacklog >= BACKLOG_THRESHOLD && (!lastSheet || lastSheet < slaIso);
-    const apiStalled = apiBacklog >= BACKLOG_THRESHOLD && (!lastUpload || lastUpload < slaIso);
+    const stalled = backlog >= BACKLOG_THRESHOLD && (!lastUpload || lastUpload < slaIso);
 
     report = {
       checked_at: new Date(now).toISOString(),
-      sheet: { backlog: sheetBacklog, last_success: lastSheet, stalled: sheetStalled },
-      api: { backlog: apiBacklog, last_success: lastUpload, stalled: apiStalled },
-      thresholds: { stall_grace_min: STALL_GRACE_MIN, success_sla_min: SUCCESS_SLA_MIN, backlog_threshold: BACKLOG_THRESHOLD },
+      api: { backlog, last_success: lastUpload, stalled },
+      config,
+      thresholds: {
+        stall_grace_min: STALL_GRACE_MIN,
+        success_sla_min: SUCCESS_SLA_MIN,
+        backlog_threshold: BACKLOG_THRESHOLD,
+        age_days: AGE_DAYS,
+      },
     };
 
-    const alert = sheetStalled || apiStalled;
+    const alert = stalled || !config.ok;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
         const parts: string[] = [];
-        if (sheetStalled) parts.push("Sheet (CallConvertOffline)");
-        if (apiStalled) parts.push("Data Manager API (CallXfer/Test_DataMgrAPIUpload)");
+        if (stalled) parts.push("delivery STALLED");
+        if (!config.ok) parts.push("MISCONFIGURED");
         const subject = force && !alert
           ? "NBA offline-conversion health check — TEST (healthy)"
-          : `⚠️ NBA offline conversions STALLED — ${parts.join(" + ")}`;
+          : `⚠️ NBA offline conversions (Data Manager API) — ${parts.join(" + ")}`;
+        const problemHtml = config.problems.length
+          ? `<h3>Configuration problems</h3><ul>${config.problems.map((p) => `<li>${p}</li>`).join("")}</ul>`
+          : "";
         try {
           await fetch("https://api.resend.com/emails", {
             method: "POST",
@@ -133,13 +226,16 @@ Deno.serve(async (req: Request) => {
               from: "onboarding@resend.dev",
               to: ALERT_TO,
               subject,
-              html: `<h2>Offline-conversion pipeline health</h2>
-<p>One or more delivery paths appear stalled. Ingestion is unaffected; this is about delivery to Google.</p>
+              html: `<h2>Offline-conversion pipeline health (Data Manager API)</h2>
+<p>The Data Manager API is the sole delivery path to Google Ads. Ingestion (Ringba/Caliber
+webhooks) is unaffected by anything below; this is about delivery to Google.</p>
+${problemHtml}
 <pre>${JSON.stringify(report, null, 2)}</pre>
-<p>First check: is the export view read timing out again? Probe safely with
-<code>sync-google-sheet?dry_run=true</code> and
-<code>upload-google-offline-conversions?validate_only=true</code>.
-See <code>docs/pipeline-incident-2026-08/README.md</code>.</p>`,
+<p>First checks: probe the uploader safely with
+<code>upload-google-offline-conversions?validate_only=true</code> (sends validateOnly to Google,
+writes nothing). If that is clean, the export view read may be timing out again — see
+<code>docs/pipeline-incident-2026-08/README.md</code>. Per-day delivery counts:
+<code>select * from v_offline_cv_upload_daily order by conversion_day_et desc limit 14;</code></p>`,
             }),
           });
           report = { ...report, alert_emailed: true };
