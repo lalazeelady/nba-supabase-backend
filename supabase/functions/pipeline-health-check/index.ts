@@ -15,7 +15,7 @@
 // see docs/offline-cv-accuracy/SHEET-TO-API-READY.md — add a second backlog count
 // filtered on `sheet_synced_at IS NULL` plus a max(sheet_synced_at) last-success.)
 //
-// Two independent failure modes are checked:
+// Three independent failure modes are checked:
 //
 //   1. STALL — rows the uploader SHOULD have delivered by now but hasn't, AND no
 //      successful upload in the last hour. The backlog comes from the
@@ -27,7 +27,17 @@
 //      failure is reported as "backlog unknown" (which alerts on its own) rather
 //      than 500ing the check, so a slow view still cannot take the watchdog down.
 //
-//   2. MISCONFIG — the uploader is running but wired so nothing (or the wrong
+//   2. REJECTED — Google is ACCEPTING the connection but rejecting the events.
+//      The stall check structurally cannot see this: a rejected row is marked
+//      status='failed' and leaves the ready set, so the backlog drains to zero and
+//      stall goes quiet while every conversion is lost. The config audit misses it
+//      too — it verifies the OAuth secrets are PRESENT, not that the refresh token
+//      still WORKS, so a revoked grant reports all-green while failing every upload.
+//      Alerts on a sustained failure RATE (not a raw count), so the handful of
+//      naturally-unmatchable rows never pages anyone, and includes the most common
+//      error message so the email says what Google actually objected to.
+//
+//   3. MISCONFIG — the uploader is running but wired so nothing (or the wrong
 //      thing) reaches Google. This is the failure mode a backlog check CANNOT see:
 //      with GOOGLE_UPLOAD_ENABLED unset the uploader silently falls back to
 //      dry_run, marks rows attempted, and the backlog stays flat while Google
@@ -55,6 +65,9 @@ const SUCCESS_SLA_MIN = 60;      // no success on the path in this long (with ba
 const BACKLOG_THRESHOLD = 50;    // ignore tiny transient backlogs (~1-2 cycles of volume)
 const AGE_DAYS = 85;             // matches the uploader's Google 90-day cutoff
 const MAX_ATTEMPTS = 6;          // matches the uploader's retry cap
+const FAILURE_WINDOW_H = 3;      // look back this far for delivery failures
+const FAILURE_MIN = 10;          // floor: ignore a trickle of naturally-unmatchable rows
+const FAILURE_RATE = 0.20;       // ...and only alert when this share of attempts failed
 const ALERT_TO = "larazielin1@gmail.com";
 
 // Report a secret as set/unset with a last-4 fingerprint — enough to tell two
@@ -160,6 +173,36 @@ async function apiBacklogCount(
   return typeof data === "number" ? data : Number(data ?? 0);
 }
 
+interface FailureStats {
+  failed: number;
+  uploaded: number;
+  topError: string | null;
+  topErrorCount: number;
+}
+
+// Delivery failures vs successes over the recent window. Returns null if the probe
+// itself fails, same contract as apiBacklogCount.
+async function failureStats(
+  supabase: ReturnType<typeof createClient>,
+): Promise<FailureStats | null> {
+  const { data, error } = await supabase.rpc(
+    "offline_cv_failure_stats",
+    { window_hours: FAILURE_WINDOW_H } as unknown as undefined,
+  );
+  if (error) {
+    console.error("failure probe failed:", error.message);
+    return null;
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | undefined;
+  if (!row) return { failed: 0, uploaded: 0, topError: null, topErrorCount: 0 };
+  return {
+    failed: Number(row.failed_count ?? 0),
+    uploaded: Number(row.uploaded_count ?? 0),
+    topError: (row.top_error as string | null) ?? null,
+    topErrorCount: Number(row.top_error_count ?? 0),
+  };
+}
+
 async function lastUploadSuccess(
   supabase: ReturnType<typeof createClient>,
 ): Promise<string | null> {
@@ -195,47 +238,90 @@ Deno.serve(async (req: Request) => {
   let report: Record<string, unknown>;
   try {
     const config = auditConfig();
-    const [backlog, lastUpload] = await Promise.all([
+    const [backlog, lastUpload, failures] = await Promise.all([
       apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
+      failureStats(supabase),
     ]);
+
+    // `config` stays a pure audit of the environment. Runtime faults (probe failures,
+    // rejections) go in `problems` alongside it, so config.ok never reads `true` next to
+    // a listed problem.
+    const problems: string[] = [...config.problems];
 
     // An unknown backlog is itself a fault (we are blind), but it is NOT a stall.
     const backlogUnknown = backlog === null;
     if (backlogUnknown) {
-      config.ok = false;
-      config.problems.push(
+      problems.push(
         "Backlog probe offline_cv_api_backlog() failed — the export view may be timing out again " +
         "(see docs/pipeline-incident-2026-08/README.md). Delivery may be fine; we cannot currently tell.",
       );
     }
     const stalled = !backlogUnknown && backlog >= BACKLOG_THRESHOLD && (!lastUpload || lastUpload < slaIso);
 
+    // Google is rejecting us: enough failures to be real, AND a high share of attempts.
+    // Rate (not count) so a busy healthy day can't out-scale the threshold, and the floor
+    // so a couple of unmatchable rows on a quiet night can't trip it.
+    const failureAttempts = failures ? failures.failed + failures.uploaded : 0;
+    const failureRate = failureAttempts > 0 ? (failures as FailureStats).failed / failureAttempts : 0;
+    const rejecting = Boolean(
+      failures && failures.failed >= FAILURE_MIN && failureRate >= FAILURE_RATE,
+    );
+    if (failures === null) {
+      problems.push(
+        "Failure probe offline_cv_failure_stats() failed — cannot tell whether Google is " +
+        "rejecting uploads.",
+      );
+    } else if (rejecting) {
+      problems.push(
+        `Google is REJECTING uploads: ${failures.failed} of ${failureAttempts} attempts in the ` +
+        `last ${FAILURE_WINDOW_H}h failed (${Math.round(failureRate * 100)}%). These rows are marked ` +
+        "'failed' and will NOT be retried, so they are lost unless requeued. Most common error: " +
+        `${failures.topError ?? "(none recorded)"}${failures.topErrorCount ? ` (x${failures.topErrorCount})` : ""}. ` +
+        "Most likely causes: the Google OAuth grant was revoked/expired, or the destination id " +
+        "no longer points at a live conversion action.",
+      );
+    }
+
     report = {
       checked_at: new Date(now).toISOString(),
+      problems,
       api: { backlog, last_success: lastUpload, stalled },
+      delivery: failures === null ? { probe: "failed" } : {
+        window_hours: FAILURE_WINDOW_H,
+        failed: failures.failed,
+        uploaded: failures.uploaded,
+        failure_rate: Number(failureRate.toFixed(3)),
+        top_error: failures.topError,
+        top_error_count: failures.topErrorCount,
+        rejecting,
+      },
       config,
       thresholds: {
         stall_grace_min: STALL_GRACE_MIN,
         success_sla_min: SUCCESS_SLA_MIN,
         backlog_threshold: BACKLOG_THRESHOLD,
         age_days: AGE_DAYS,
+        failure_window_h: FAILURE_WINDOW_H,
+        failure_min: FAILURE_MIN,
+        failure_rate: FAILURE_RATE,
       },
     };
 
-    const alert = stalled || !config.ok;
+    const alert = stalled || rejecting || backlogUnknown || failures === null || !config.ok;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
         const parts: string[] = [];
         if (stalled) parts.push("delivery STALLED");
+        if (rejecting) parts.push("Google REJECTING uploads");
         if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
         if (!config.ok) parts.push("MISCONFIGURED");
         const subject = force && !alert
           ? "NBA offline-conversion health check — TEST (healthy)"
           : `⚠️ NBA offline conversions (Data Manager API) — ${parts.join(" + ")}`;
-        const problemHtml = config.problems.length
-          ? `<h3>Configuration problems</h3><ul>${config.problems.map((p) => `<li>${p}</li>`).join("")}</ul>`
+        const problemHtml = problems.length
+          ? `<h3>What's wrong</h3><ul>${problems.map((p) => `<li>${p}</li>`).join("")}</ul>`
           : "";
         try {
           await fetch("https://api.resend.com/emails", {
