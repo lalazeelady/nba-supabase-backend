@@ -12,16 +12,20 @@
 // backlog is EXPECTED, not a fault. Watching it here would have produced a false
 // "stalled" email every hour, forever. The Data Manager API is now the sole path,
 // so this check watches only that. (To restore Sheet monitoring during a rollback,
-// see docs/offline-cv-accuracy/SHEET-TO-API-READY.md — reinstate `countBacklog`
-// with `sheet_synced_at IS NULL` and `lastSuccess("sheet_synced_at")`.)
+// see docs/offline-cv-accuracy/SHEET-TO-API-READY.md — add a second backlog count
+// filtered on `sheet_synced_at IS NULL` plus a max(sheet_synced_at) last-success.)
 //
 // Two independent failure modes are checked:
 //
-//   1. STALL — rows in the ready set that should have been delivered a while ago
-//      but weren't (uploaded_at IS NULL, conversion_time <= 85d, attempts < cap,
-//      created > STALL_GRACE ago), AND no successful upload in the last hour.
-//      Reads the BASE TABLE directly, never the export view, so it can't be taken
-//      down by the same view-timeout that caused the outage.
+//   1. STALL — rows the uploader SHOULD have delivered by now but hasn't, AND no
+//      successful upload in the last hour. The backlog comes from the
+//      offline_cv_api_backlog() RPC, which applies the SAME eligibility the
+//      uploader uses (v_offline_conversion_export: Google/YouTube-sourced, has a
+//      matchable identifier). Counting the base table instead over-counts wildly —
+//      at cutover that was 2902 vs an actually-eligible 0, i.e. a false STALLED
+//      email every hour. The RPC carries its own short statement_timeout and a
+//      failure is reported as "backlog unknown" (which alerts on its own) rather
+//      than 500ing the check, so a slow view still cannot take the watchdog down.
 //
 //   2. MISCONFIG — the uploader is running but wired so nothing (or the wrong
 //      thing) reaches Google. This is the failure mode a backlog check CANNOT see:
@@ -46,11 +50,11 @@ const corsHeaders = {
     "Content-Type, Authorization, X-Client-Info, Apikey, x-webhook-secret, x-invoke-secret",
 };
 
-const READY_STATUSES = ["monetize_ready", "ready_to_upload", "transfer_ready"];
 const STALL_GRACE_MIN = 90;      // a row older than this should already be delivered (cron runs /15min)
 const SUCCESS_SLA_MIN = 60;      // no success on the path in this long (with backlog) => stalled
 const BACKLOG_THRESHOLD = 50;    // ignore tiny transient backlogs (~1-2 cycles of volume)
 const AGE_DAYS = 85;             // matches the uploader's Google 90-day cutoff
+const MAX_ATTEMPTS = 6;          // matches the uploader's retry cap
 const ALERT_TO = "larazielin1@gmail.com";
 
 // Report a secret as set/unset with a last-4 fingerprint — enough to tell two
@@ -132,21 +136,28 @@ function auditConfig(): ConfigAudit {
   };
 }
 
+// Returns null when the probe itself fails — the caller alerts on that separately
+// instead of letting one slow query take down the whole health check.
 async function apiBacklogCount(
   supabase: ReturnType<typeof createClient>,
-  graceIso: string,
-  ageCutoffIso: string,
-): Promise<number> {
-  const { count, error } = await supabase.from("offline_conversion_events")
-    .select("id", { count: "exact", head: true })
-    .eq("publisher", "NBA")
-    .in("status", READY_STATUSES)
-    .lt("created_at", graceIso)
-    .is("uploaded_at", null)
-    .gte("conversion_time", ageCutoffIso)
-    .lt("upload_attempts", 6);
-  if (error) throw new Error(`backlog(api): ${error.message}`);
-  return count ?? 0;
+): Promise<number | null> {
+  // The RPC isn't in the generated DB types (there are none in this project), so
+  // supabase-js infers its args as `undefined`. Cast the ARGS at the call site rather
+  // than aliasing supabase.rpc into a local — an alias drops the `this` binding and
+  // throws "Cannot read properties of undefined (reading 'rest')" at runtime.
+  const { data, error } = await supabase.rpc(
+    "offline_cv_api_backlog",
+    {
+      grace_minutes: STALL_GRACE_MIN,
+      age_days: AGE_DAYS,
+      max_attempts: MAX_ATTEMPTS,
+    } as unknown as undefined,
+  );
+  if (error) {
+    console.error("backlog probe failed:", error.message);
+    return null;
+  }
+  return typeof data === "number" ? data : Number(data ?? 0);
 }
 
 async function lastUploadSuccess(
@@ -179,19 +190,26 @@ Deno.serve(async (req: Request) => {
   );
 
   const now = Date.now();
-  const graceIso = new Date(now - STALL_GRACE_MIN * 60000).toISOString();
   const slaIso = new Date(now - SUCCESS_SLA_MIN * 60000).toISOString();
-  const ageCutoffIso = new Date(now - AGE_DAYS * 86400000).toISOString();
 
   let report: Record<string, unknown>;
   try {
     const config = auditConfig();
     const [backlog, lastUpload] = await Promise.all([
-      apiBacklogCount(supabase, graceIso, ageCutoffIso),
+      apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
     ]);
 
-    const stalled = backlog >= BACKLOG_THRESHOLD && (!lastUpload || lastUpload < slaIso);
+    // An unknown backlog is itself a fault (we are blind), but it is NOT a stall.
+    const backlogUnknown = backlog === null;
+    if (backlogUnknown) {
+      config.ok = false;
+      config.problems.push(
+        "Backlog probe offline_cv_api_backlog() failed — the export view may be timing out again " +
+        "(see docs/pipeline-incident-2026-08/README.md). Delivery may be fine; we cannot currently tell.",
+      );
+    }
+    const stalled = !backlogUnknown && backlog >= BACKLOG_THRESHOLD && (!lastUpload || lastUpload < slaIso);
 
     report = {
       checked_at: new Date(now).toISOString(),
@@ -211,6 +229,7 @@ Deno.serve(async (req: Request) => {
       if (resendKey) {
         const parts: string[] = [];
         if (stalled) parts.push("delivery STALLED");
+        if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
         if (!config.ok) parts.push("MISCONFIGURED");
         const subject = force && !alert
           ? "NBA offline-conversion health check — TEST (healthy)"
