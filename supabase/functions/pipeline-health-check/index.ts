@@ -6,14 +6,21 @@
 // alerted because the failing SELECT never reached the code that flips rows to
 // `failed` / emails.
 //
-// SCOPE (post Sheet->API cutover, 2026-09): the Google Sheet path is retired.
-// `sync-google-sheet-15min` (cron jobid 3) is unscheduled and Google Ads no longer
-// imports the Sheet, so `sheet_synced_at` intentionally stops filling and a Sheet
-// backlog is EXPECTED, not a fault. Watching it here would have produced a false
-// "stalled" email every hour, forever. The Data Manager API is now the sole path,
-// so this check watches only that. (To restore Sheet monitoring during a rollback,
-// see docs/offline-cv-accuracy/SHEET-TO-API-READY.md — add a second backlog count
-// filtered on `sheet_synced_at IS NULL` plus a max(sheet_synced_at) last-success.)
+// SCOPE (post Sheet->API cutover, 2026-09-03): the Sheet is no longer a DELIVERY
+// path. Google Ads' scheduled Sheet import is turned off, so the Data Manager API is
+// the only thing feeding CallConvertOffline and CallXfer -- this check watches only
+// that.
+//
+// Note `sync-google-sheet-15min` (cron jobid 3) is deliberately STILL RUNNING. It
+// keeps mirroring rows to the Sheet so a rollback stays lossless (re-enable the Ads
+// import and no window is missing). That is why the Sheet is not monitored here even
+// though it is still writing: a Sheet fault no longer costs a conversion, and once
+// the cron is eventually unscheduled `sheet_synced_at` stops filling by design, so a
+// Sheet backlog would page every hour forever for no reason.
+//
+// To restore Sheet monitoring during a rollback, see
+// docs/offline-cv-accuracy/SHEET-TO-API-READY.md — add a second backlog count filtered
+// on `sheet_synced_at IS NULL` plus a max(sheet_synced_at) last-success.
 //
 // Three independent failure modes are checked:
 //

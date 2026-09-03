@@ -2,9 +2,12 @@
 
 Written during the **Sheet → Data Manager API cutover** (branch `gads-cco-datamanager-api-cutover`).
 
-Once the API is the sole upload path, everything below is **dead weight kept deliberately for
-rollback**. Nothing here is deleted yet — this is the cleanup list for later. Do not clean up until
-the API path has run solo and verified clean for at least two weeks.
+**Cutover completed 2026-09-03.** The API is now the sole upload path to Google Ads, so everything
+below is **dead weight kept deliberately for rollback**. Nothing here is deleted — this is the
+cleanup list for later. Do not clean up until the API path has run solo and verified clean for at
+least two weeks (i.e. not before ~2026-09-17).
+
+Note the Sheet cron (jobid 3) is still running by choice; see the table below.
 
 Rollback is documented in [`SHEET-TO-API-READY.md`](SHEET-TO-API-READY.md). Every item below is
 part of that rollback path, which is why it still exists.
@@ -15,7 +18,7 @@ part of that rollback path, which is why it still exists.
 
 | jobid | name | State after cutover | Notes |
 |---|---|---|---|
-| 3 | `sync-google-sheet-15min` | **Unscheduled** | The cutover step. `cron.unschedule('sync-google-sheet-15min')`. Rollback = re-`cron.schedule` with the exact command in SHEET-TO-API-READY.md. |
+| 3 | `sync-google-sheet-15min` | **STILL RUNNING (deliberate)** | Owner chose to leave it after cutover so rollback stays lossless. Harmless: the Ads Sheet import is off, so nothing it writes reaches Google. Unschedule with `cron.unschedule('sync-google-sheet-15min')` whenever you want; rollback = re-`cron.schedule` with the exact command in SHEET-TO-API-READY.md. |
 | 4 | `archive-old-sheet-rows-daily` | **Left running** (agreed) | Only trims rows off the Sheet. Harmless, and cheap insurance if the Sheet is ever restored. Safe to unschedule any time. |
 | 8 | `upload-google-offline-conversions` | **Active — the live path** | Not an orphan. Do not touch. |
 | 10 | `pipeline-health-check-hourly` | **Active** | Not an orphan. Rewritten in this branch to watch the API only. |

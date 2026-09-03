@@ -1,4 +1,20 @@
-# Sheet → Data Manager API cutover — RUNBOOK
+# Sheet → Data Manager API cutover — DONE (2026-09-03)
+
+> **STATUS: complete and verified in production.** CallConvertOffline is fed by the Data Manager
+> API only; the Google Ads scheduled Sheet import is OFF; conversions were confirmed landing on
+> the correct action in the Ads UI. Steps 1–4 below are done.
+>
+> **Step 5 (`cron.unschedule('sync-google-sheet-15min')`) was deliberately NOT run.** The Sheet
+> cron keeps mirroring rows so the rollback stays lossless — re-enable the Ads import and no
+> window is missing. It costs nothing and there is no double-count risk while the Ads import is
+> off. Run step 5 whenever you want to finish tidying; nothing depends on it.
+>
+> Verified at cutover — CCO → destination `…7495`, CallXfer → `…3232`, both accepted by Google,
+> zero failures.
+
+---
+
+# Original runbook
 
 Goal: retire the Google Sheet path. The API (`upload-google-offline-conversions`, cron jobid 8,
 already live every 15 min) becomes the **sole** upload path, sending CCO to the **real
