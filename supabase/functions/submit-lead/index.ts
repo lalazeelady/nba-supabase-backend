@@ -621,12 +621,16 @@ Deno.serve(async (req: Request) => {
       city: payload.city,
       zip_code: payload.zip,
       annual_income: ({ under_50k: 50000, "50k_75k": 75000, "76k_150k": 150000, "150k_plus": 150001 } as Record<string, number>)[payload.annual_income] ?? 0,
-      // CallTools' contact field is `employment`, not `employment_status` -- confirmed
-      // from the API response echo, which lists `employment: null` and has no
-      // `employment_status` key at all. This is the long-standing "CallTools drops
-      // employment_status" gap in DECISIONS.md: a field-name mismatch, not a missing
-      // field. Values are the same snake_case strings `citizenship` already accepts.
-      employment: payload.employment_status,
+      // CallTools' contact field is `employment`, not `employment_status` (confirmed
+      // from the API response echo). But `employment` is a CONSTRAINED ENUM and our
+      // form's values are not in it — live traffic on 2026-09-03 returned
+      //   400 {"employment":["\"employed_full_time\" is not a valid choice."]}
+      //   400 {"employment":["\"unemployed\" is not a valid choice."]}
+      // so we do NOT send it. Keeping the old (ignored) key preserves the previous
+      // behaviour exactly: CallTools drops it, nothing 400s, one request per lead.
+      // To actually land it we need CallTools' accepted choice list — see
+      // CONFIG-TODO.md §4. Do not "fix" this back to `employment` without that list.
+      employment_status: payload.employment_status,
       first_name: payload.first_name,
       last_name: payload.last_name,
       email: payload.email,
@@ -699,15 +703,31 @@ Deno.serve(async (req: Request) => {
     // the new fields on that lead; we never lose the lead. This also makes the
     // CallTools custom-field rollout in CONFIG-TODO.md safe to do live.
     const NEW_CRM_FIELDS = [
-      "employment", "oppref_id", "trusted_form", "consent_url",
+      "oppref_id", "trusted_form", "consent_url",
       "landing_page", "ip_address", "user_agent", "referrer", "needs", "pubid",
       "ttclid", "li_fat_id", "twclid", "epik",
     ];
     const crmBodySafe: Record<string, unknown> = { ...crmBody };
     for (const k of NEW_CRM_FIELDS) delete crmBodySafe[k];
     // Restore the pre-branch name so the fallback is byte-for-byte the old payload.
-    if (payload.employment_status) crmBodySafe.employment_status = payload.employment_status;
     if (payload.oppref) crmBodySafe.oppref = payload.oppref;
+
+    // CallTools reports rejections per field, DRF-style:
+    //   {"employment":["\"unemployed\" is not a valid choice."]}
+    // so on a 400 we can strip exactly the offending field(s) and keep everything
+    // else, instead of dropping all the new fields. Only strips keys we added in
+    // this branch — a rejection on a long-standing field is a real bug and should
+    // surface, not be silently papered over.
+    const strippableOnReject = new Set(NEW_CRM_FIELDS);
+    function fieldsRejectedBy(rawBody: string): string[] {
+      try {
+        const parsed = JSON.parse(rawBody);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+        return Object.keys(parsed).filter((k) => strippableOnReject.has(k));
+      } catch {
+        return [];
+      }
+    }
 
     const crmUrl = "https://app.calltools.io/api/contacts/";
 
@@ -741,6 +761,11 @@ Deno.serve(async (req: Request) => {
       // Swapped to crmBodySafe after a 4xx (once). See the note above crmBodySafe.
       let usingSafeBody = false;
       let attemptsUsed = 0;
+      // Bound the strip-and-retry loop. Each round removes at least one field so it
+      // terminates on its own, but a cap keeps a pathological response from turning
+      // one submission into a dozen CallTools calls.
+      let stripRounds = 0;
+      const MAX_STRIP_ROUNDS = 3;
 
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         attemptsUsed = attempt;
@@ -788,6 +813,16 @@ Deno.serve(async (req: Request) => {
           // 4xx is our request's fault, so a plain retry is pointless — but a
           // retry with the known-good field set is not. Do that once, then stop.
           if (status < 500) {
+            // First choice: drop only the field(s) CallTools actually named.
+            const rejected = fieldsRejectedBy(rawBody).filter((k) => k in crmBody);
+            if (rejected.length > 0 && stripRounds < MAX_STRIP_ROUNDS) {
+              stripRounds++;
+              console.warn("CallTools rejected field(s); dropping and retrying:", rejected.join(", "));
+              for (const k of rejected) delete crmBody[k];
+              attempt--;
+              continue;
+            }
+            // Otherwise fall back to the field set that has worked for months.
             if (!usingSafeBody) {
               console.warn("CallTools 4xx; retrying once with the pre-branch field set:", error);
               usingSafeBody = true;

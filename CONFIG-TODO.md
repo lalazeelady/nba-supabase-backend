@@ -118,38 +118,54 @@ an IP regardless of what Ringba sends.
 
 ---
 
-## 4. RESOLVED IN CODE — three fields were posted under the wrong name
+## 4. PARTLY RESOLVED IN CODE — and one open question for CallTools
 
 The CallTools API response echoes the **entire contact record** back on every
-create. Reading it (Sep 2026) settled several open questions at once, including
-the long-standing "CallTools silently drops `employment_status`" note in
-`DECISIONS.md`. That was never a missing field — it was a **name mismatch**.
-
-Confirmed real fields on the CallTools contact, vs. what we were sending:
+create. Reading it (Sep 2026) settled several open questions, including the
+long-standing "CallTools silently drops `employment_status`" note in
+`DECISIONS.md` — that was never a missing field, it was a **name mismatch**.
 
 | CallTools field | we were sending | status |
 |---|---|---|
-| `employment` | `employment_status` | **fixed in this branch** — the gap in `DECISIONS.md` |
-| `oppref_id` | `oppref` | **fixed in this branch** |
-| `trusted_form` | only `jornaya_lead_id` | **fixed** — now sends both; the enrich URL reads `trusted_form` |
+| `oppref_id` | `oppref` | **fixed in this branch** — now lands |
+| `trusted_form` | only `jornaya_lead_id` | **fixed** — sends both; the enrich URL reads `trusted_form` |
 | `consent_url` | nothing | **fixed** — now carries the referring funnel URL |
+| `employment` | `employment_status` | **BLOCKED — needs your input, see below** |
 
-`DECISIONS.md` should be corrected: the fix for `employment_status` was a code
-change, not "add a custom field in the CallTools account".
+### `employment` is a constrained enum, and we don't know its choices
 
-**Watch after deploy.** These four values are now posted to fields that exist.
-If `employment` turns out to be a constrained enum rather than free text,
-CallTools will 400 the request (it does not retry 4xx) and the lead will land in
-`leads` with `crm_status='failed'` plus a Resend alert. `citizenship` already
-accepts the same style of snake_case value on this contact, so free text is the
-expectation — but confirm with:
+Renaming `employment_status` → `employment` was deployed and immediately
+rejected by live traffic:
 
-```sql
-select crm_status, count(*) from leads
-where created_at > now() - interval '20 minutes' group by 1;
+```
+400 {"employment":["\"employed_full_time\" is not a valid choice."]}
+400 {"employment":["\"unemployed\" is not a valid choice."]}
 ```
 
-Any spike in `failed` means roll back by reverting the four renames.
+No leads were lost — the function retries a 400 without the offending field —
+but the value still does not land. **We need CallTools' accepted choice list.**
+
+Our four form values are `employed_full_time`, `employed_part_time`,
+`unemployed`, `retired`. To close this, either:
+
+1. Open the `employment` field in the CallTools UI and read its dropdown
+   options, then tell me and I'll add the mapping (this is a 5-minute fix); **or**
+2. Ask CallTools support for the accepted values; **or**
+3. Create a *new* free-text custom field (e.g. `employment_status`) and we send
+   our raw values there instead — no mapping needed.
+
+Until then `submit-lead` deliberately sends the old, ignored `employment_status`
+key, exactly as before. **Do not rename it back to `employment` without the
+choice list.**
+
+### Safety net (relevant to everything in §5)
+
+On a 4xx, `submit-lead` parses CallTools' per-field error body and retries with
+just the offending field(s) removed; if that doesn't parse, it retries once with
+the field set that has worked for months. **A lead is never lost to a bad
+field.** This is what makes the custom-field rollout below safe to do against
+live traffic — if you create a field with the wrong type, you lose that field on
+those leads, not the leads.
 
 ## 5. New CallTools custom fields for the fields this branch starts sending — MED
 
