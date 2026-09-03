@@ -211,20 +211,52 @@ the CallTools payload and reach neither Ringba nor its postback.
 
 ---
 
-## 7. Caliber — LOW
+## 7. Caliber — questions only they can answer
 
-- **Confirm the `address` and `city` key names.** `submit-lead` sends
-  `contact.address` / `contact.city` on the assumption they mirror CallTools.
-  Caliber silently drops unrecognized field names, so if they're wrong we lose
-  them with no error. Ask them to confirm against their ingest spec.
-- **Ask Caliber to echo `zip`, `state` and `ip_address` on the conversion pixel.**
-  Their postback carries UTMs and every click id but no address fields at all
-  (`caller_zip` and `caller_state` are 0 / 6,612). Zip in particular would lift
-  Google ECL match rates for the internet-buyer path.
-- **`agent_name` and `queue` arrive as empty strings** on 100% of Caliber
-  postbacks — the keys are present, the values never are. Worth one question.
+The funnel posts to CallTools and Caliber **in parallel, from the same payload**.
+After the `age` + `publisher` additions, the two are at parity: every canonical
+column on `leads` reaches both, allowing for each destination's own field names
+and enum vocabulary.
 
----
+| canonical (`leads`) | → CallTools | → Caliber |
+|---|---|---|
+| `street_address` | `address` | `contact.address` *(unconfirmed)* |
+| `city` | `city` | `contact.city` *(unconfirmed)* |
+| `zip` | `zip_code` | `contact.zip` |
+| `phone` | `home_phone_number` | `contact.phone` |
+| `annual_income` | numeric (`50000`) | range label (`25_50k`) |
+| `employment_status` | *(not sent — enum mismatch, §4)* | `full_time` / `part_time` / … |
+| `citizenship` | raw | 3 values folded to 2 |
+| `trusted_form_cert_url` | `jornaya_lead_id` + `trusted_form` | `consent.jornaya_leadid` + `consent.trustedform_cert_url` |
+| `ip_address` | `ip_address` | `consent.ip` |
+| `user_agent` | `user_agent` | `consent.user_agent` |
+| `referrer` | `consent_url` + `referrer` | `consent.url` + `attribution.referrer` |
+| `age` | `age` | `extended.age` |
+| `publisher` | `pubid` | `attribution.publisher` |
+| `needs` | `needs` | `extended.needs` |
+
+The per-destination renames and enum mappings are deliberate adapters. **`leads`
+holds the canonical raw values** (`under_50k`, `employed_full_time`, …), so any
+future CRM is a new adapter, not a re-derivation.
+
+### Three things to ask Caliber
+
+1. **Confirm `contact.address` and `contact.city` land.** We chose those key
+   names by mirroring CallTools, never against their spec. Caliber drops an
+   unrecognized field **silently** and its response is only
+   `{status, lead_id, request_id}` — no echo of what was accepted. So if the
+   names are wrong we are shipping incomplete leads to a buyer with no error and
+   no way to detect it from our side. This is the single highest-value question
+   here.
+2. **Ask for their full accepted-field list.** Same reason: we cannot discover it
+   from responses the way we could with CallTools. Without it, "complete and
+   consistent" is an assumption rather than a fact.
+3. **Ask them to echo `zip`, `state` and `ip_address` on the conversion pixel.**
+   Their postback carries UTMs and every click id but no address fields at all
+   (`caller_zip` and `caller_state` are 0 / 6,612). Zip in particular would lift
+   Google ECL match rates on the internet-buyer path. Also: `agent_name` and
+   `queue` arrive as empty strings on 100% of Caliber postbacks — the keys are
+   present, the values never are.
 
 ## 8. Cosmetic — LOW
 

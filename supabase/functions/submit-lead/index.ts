@@ -92,6 +92,10 @@ async function postToCaliber(args: {
   // are the same instant — previously Caliber got a timestamp we never kept.
   consentTimestamp: string;
   needs: string;
+  // Server-derived age. CallTools has received this for a while; Caliber was the
+  // only destination not getting it, which was the last real asymmetry between
+  // the two parallel lead posts.
+  age: number | null;
 }): Promise<CaliberCallResult> {
   // Direct API (Caliber turned OFF HMAC 2026-08-29): authenticate with the key as a plain Bearer
   // token. The value in CALIBER_HMAC_SECRET is now used as the API key, not a signing secret
@@ -156,6 +160,8 @@ async function postToCaliber(args: {
       // consent_ad_* later — required only for EU/UK, which NBA doesn't run).
       referrer: args.refererUrl || undefined,
       landing_page: args.payload.landing_page || undefined,
+      // Publisher / sub-publisher, mirroring what CallTools gets as `pubid`.
+      publisher: args.payload.publisher || undefined,
       click_timestamp: args.payload.click_timestamp || undefined,
       consent_ad_storage: args.payload.consent_ad_storage,
       consent_ad_user_data: args.payload.consent_ad_user_data,
@@ -167,6 +173,7 @@ async function postToCaliber(args: {
       // Caliber's accepted enum values, returning undefined for anything that
       // doesn't fit (omitted from the payload entirely).
       date_of_birth: args.payload.dob || undefined,
+      age: args.age ?? undefined,
       citizenship: mapCitizenshipToCaliber(args.payload.citizenship),
       employment_status: mapEmploymentStatusToCaliber(args.payload.employment_status),
       annual_household_income_range: mapAnnualIncomeToCaliber(args.payload.annual_income),
@@ -865,6 +872,7 @@ Deno.serve(async (req: Request) => {
       refererUrl,
       consentTimestamp,
       needs,
+      age: ageToStore,
     });
 
     const [crmResult, caliberResult] = await Promise.all([calltoolsPromise, caliberPromise]);
