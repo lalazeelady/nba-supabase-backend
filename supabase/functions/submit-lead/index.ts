@@ -621,7 +621,12 @@ Deno.serve(async (req: Request) => {
       city: payload.city,
       zip_code: payload.zip,
       annual_income: ({ under_50k: 50000, "50k_75k": 75000, "76k_150k": 150000, "150k_plus": 150001 } as Record<string, number>)[payload.annual_income] ?? 0,
-      employment_status: payload.employment_status,
+      // CallTools' contact field is `employment`, not `employment_status` -- confirmed
+      // from the API response echo, which lists `employment: null` and has no
+      // `employment_status` key at all. This is the long-standing "CallTools drops
+      // employment_status" gap in DECISIONS.md: a field-name mismatch, not a missing
+      // field. Values are the same snake_case strings `citizenship` already accepts.
+      employment: payload.employment_status,
       first_name: payload.first_name,
       last_name: payload.last_name,
       email: payload.email,
@@ -631,11 +636,16 @@ Deno.serve(async (req: Request) => {
       // CallTools side is configured to receive it under that name. The VALUE
       // is now the TrustedForm cert URL going forward.
       jornaya_lead_id: payload.trusted_form_cert_url || "",
+      // `trusted_form` is a separate real field on the contact, and it is what the
+      // Ringba enrich URL reads ({{%locals[contact][trusted_form]}}). We were only
+      // filling jornaya_lead_id, so that enrich token always resolved empty.
+      trusted_form: payload.trusted_form_cert_url || "",
       gclid: payload.gclid || payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
       msclkid: payload.msclkid || "",
-      oppref: payload.oppref || "",
+      // Likewise `oppref_id`, not `oppref`.
+      oppref_id: payload.oppref || "",
       fbclid: payload.fbclid || "",
       utm_source: payload.utm_source || "",
       utm_medium: payload.utm_medium || "",
@@ -651,6 +661,9 @@ Deno.serve(async (req: Request) => {
       landing_page: payload.landing_page || "",
       ip_address: clientIp !== "unknown" ? clientIp : "",
       user_agent: userAgent,
+      // `consent_url` is a real contact field and is exactly what the referring
+      // funnel URL is. `referrer` is also sent for whenever a custom field is added.
+      consent_url: refererUrl,
       referrer: refererUrl,
       needs: needs,
       pubid: payload.publisher || "",

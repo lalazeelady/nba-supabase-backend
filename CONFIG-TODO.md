@@ -118,28 +118,38 @@ an IP regardless of what Ringba sends.
 
 ---
 
-## 4. `employ_stat` reads a field name we don't post — MED
+## 4. RESOLVED IN CODE — three fields were posted under the wrong name
 
-The enrich URL has:
+The CallTools API response echoes the **entire contact record** back on every
+create. Reading it (Sep 2026) settled several open questions at once, including
+the long-standing "CallTools silently drops `employment_status`" note in
+`DECISIONS.md`. That was never a missing field — it was a **name mismatch**.
 
+Confirmed real fields on the CallTools contact, vs. what we were sending:
+
+| CallTools field | we were sending | status |
+|---|---|---|
+| `employment` | `employment_status` | **fixed in this branch** — the gap in `DECISIONS.md` |
+| `oppref_id` | `oppref` | **fixed in this branch** |
+| `trusted_form` | only `jornaya_lead_id` | **fixed** — now sends both; the enrich URL reads `trusted_form` |
+| `consent_url` | nothing | **fixed** — now carries the referring funnel URL |
+
+`DECISIONS.md` should be corrected: the fix for `employment_status` was a code
+change, not "add a custom field in the CallTools account".
+
+**Watch after deploy.** These four values are now posted to fields that exist.
+If `employment` turns out to be a constrained enum rather than free text,
+CallTools will 400 the request (it does not retry 4xx) and the lead will land in
+`leads` with `crm_status='failed'` plus a Resend alert. `citizenship` already
+accepts the same style of snake_case value on this contact, so free text is the
+expectation — but confirm with:
+
+```sql
+select crm_status, count(*) from leads
+where created_at > now() - interval '20 minutes' group by 1;
 ```
-&employ_stat={{%locals[contact][employment]}}
-```
 
-`submit-lead` posts the key `employment_status`. `employment` is a different
-name, so the token resolves empty — and this is the same root cause as the
-long-standing note in `DECISIONS.md` that CallTools silently drops
-`employment_status` (no field is mapped to it).
-
-**Fix (one of, not both):**
-
-- **Preferred:** create a CallTools custom field named `employment_status`, then
-  change the enrich token to `{{%locals[contact][employment_status]}}`. No code
-  change, and it matches what we already send.
-- Alternative: rename the key in `submit-lead`'s `crmBody` to `employment`. Only
-  do this if CallTools has a *native* `employment` field — otherwise it drops too.
-
----
+Any spike in `failed` means roll back by reverting the four renames.
 
 ## 5. New CallTools custom fields for the fields this branch starts sending — MED
 
@@ -147,7 +157,8 @@ long-standing note in `DECISIONS.md` that CallTools silently drops
 so **nothing breaks if you skip this** — but they will not be visible to agents,
 and the enrich URL cannot forward them to Ringba, until the fields exist.
 
-Create each as a contact custom field with the **exact** name:
+Confirmed absent from the contact schema (checked against the API response echo),
+so each needs creating. Create as a contact custom field with the **exact** name:
 
 | field | value | why it matters |
 |---|---|---|
@@ -157,7 +168,7 @@ Create each as a contact custom field with the **exact** name:
 | `referrer` | referring URL | TCPA evidence |
 | `needs` | `food,utility,housing,other` | the stated intent, currently collected and thrown away |
 | `ttclid`, `li_fat_id`, `twclid`, `epik` | click ids | TikTok / LinkedIn / X / Pinterest, for when those channels run |
-| `pubid` | publisher id | only if you want sub-publisher segmentation; otherwise skip |
+| `pubid` | publisher id | **already exists** on the contact (as do `pub_id`, `ib_source`, `source`, `traffic_source`) — no need to create, we now fill it |
 
 Once they exist, add matching `&<name>={{%locals[contact][<name>]}}` params to the
 enrich URL, then matching `&<name>=[tag:User:<name>]` params to both pixels.
