@@ -19,14 +19,14 @@
 //   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
 // ...but those are now the DEFAULTS, not the only behaviour. An explicit
-// `event=conversion` param makes this endpoint handle a revenue event exactly
+// `event=monetize` param makes this endpoint handle a revenue event exactly
 // as ringba-conversion-webhook would. The endpoint is no longer the only thing
 // carrying that meaning, because when it was, a pixel pointed at the wrong URL
 // lost every event silently: the conversion became a call_transferred row with
 // a dedupe_key identical to the real transfer's, so the upsert no-opped and the
 // revenue disappeared behind an {ok:true}. See resolveEvent() / EVENT_SPEC.
 //
-// Also carried per event: `program` (energy / aca / internet / ...), without
+// Also carried per event: `offer` (energy / aca / internet / ...), without
 // which every Caliber event lands under one undifferentiated source.
 //
 // De-dup: GROSS — ONE CallXfer per Ringba CALL. dedupe_key is
@@ -58,7 +58,7 @@ const DEFAULT_SOURCE = "ringba";
 const NATIVE_EVENT = "transfer";
 
 // Everything that differs between the two event types lives here, so a request
-// that declares `event=conversion` on this endpoint is handled identically to
+// that declares `event=monetize` on this endpoint is handled identically to
 // one that arrived at ringba-conversion-webhook.
 const EVENT_SPEC = {
   transfer: {
@@ -91,14 +91,14 @@ function resolveEvent(raw: string | null): EventKind {
   return NATIVE_EVENT;
 }
 
-// Programs we recognise. An unrecognised value is still stored verbatim — a
+// Offers we recognise. An unrecognised value is still stored verbatim — a
 // typo must never cost the event — but only these are treated as canonical.
-const KNOWN_PROGRAMS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
+const KNOWN_OFFERS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
 
-function normalizeProgram(raw: string | null): string | null {
+function normalizeOffer(raw: string | null): string | null {
   const v = (raw || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (!v) return null;
-  return KNOWN_PROGRAMS.includes(v) ? v : v.slice(0, 40);
+  return KNOWN_OFFERS.includes(v) ? v : v.slice(0, 40);
 }
 
 // Field-name variants we accept from Ringba. First non-empty value wins.
@@ -191,7 +191,7 @@ const FIELD_VARIANTS = {
   // Which campaign the call belongs to (energy / aca / internet / ...). Without
   // it every Caliber event lands under one undifferentiated source and Energy
   // becomes indistinguishable from Internet in reporting.
-  program: ["program", "campaign_program", "vertical", "product"],
+  offer: ["offer", "program", "campaign_offer", "campaign_program", "vertical", "product"],
   // Caliber call status. Carried here so the "no connect" drop applies on both
   // endpoints, not just the revenue one.
   call_status: ["status", "Status", "call_status", "callStatus"],
@@ -515,7 +515,7 @@ Deno.serve(async (req: Request) => {
   const queue = pick(merged, FIELD_VARIANTS.queue);
   const call_type = pick(merged, FIELD_VARIANTS.call_type);
   const call_status = pick(merged, FIELD_VARIANTS.call_status);
-  const program = normalizeProgram(pick(merged, FIELD_VARIANTS.program));
+  const offer = normalizeOffer(pick(merged, FIELD_VARIANTS.offer));
 
   // Which event this actually is, endpoint notwithstanding.
   const eventKind = resolveEvent(pick(merged, FIELD_VARIANTS.event));
@@ -551,7 +551,7 @@ Deno.serve(async (req: Request) => {
       request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
       response_payload: {
         skipped: true, reason: "non-nba-publisher", publisher: publisher || null,
-        cv_source: source, program, event: eventKind,
+        cv_source: source, offer, event: eventKind,
       } as object,
       http_status: 200,
       success: true,
@@ -572,7 +572,7 @@ Deno.serve(async (req: Request) => {
   // whichever endpoint a pixel is pointed at.
   if (call_status && /no[\s_-]*connect/i.test(call_status)) {
     await supabase.from("api_logs").insert({
-      api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
+      api_type: `cv-${spec.log_tag}-${source}${offer ? `-${offer}` : ""}`,
       lead_id: null,
       transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
       caller_id: caller_id || "",
@@ -702,7 +702,7 @@ Deno.serve(async (req: Request) => {
         queue,
         call_type,
         call_status,
-        program,
+        offer,
         utm_source: eff_utm_source,
         utm_medium: eff_utm_medium,
         utm_campaign: eff_utm_campaign,
@@ -740,7 +740,7 @@ Deno.serve(async (req: Request) => {
   }
 
   await supabase.from("api_logs").insert({
-    api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
+    api_type: `cv-${spec.log_tag}-${source}${offer ? `-${offer}` : ""}`,
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
     caller_id: caller_id || "",
@@ -751,7 +751,7 @@ Deno.serve(async (req: Request) => {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
-        cv_source: source, program, per_call_dedupe: perCall,
+        cv_source: source, offer, per_call_dedupe: perCall,
         endpoint: "ringba-transfer-webhook", resolved_event: eventKind,
       },
     } as object,
@@ -767,7 +767,7 @@ Deno.serve(async (req: Request) => {
   return new Response(
     JSON.stringify({
       ok: true, event_id: eventId, inserted, status,
-      event_type: EVENT_TYPE, cv_source: source, program,
+      event_type: EVENT_TYPE, cv_source: source, offer,
       matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },

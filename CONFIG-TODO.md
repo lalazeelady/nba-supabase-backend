@@ -272,64 +272,49 @@ reads it in Ringba reporting, insert a `%20`.
 
 ---
 
-## 9. Ringba pixels — updates for the Caliber cutover — MED
+## 9. Ringba pixels — updates for the Caliber cutover — LOW/MED
 
-Ringba stays live for every program that has not migrated yet, so its two pixels
-should carry the same new parameters Caliber does. None of this is urgent — the
-backend accepts both the old and new forms — but without it, Ringba rows have a
-null `program` and are indistinguishable from each other in the new reporting.
+**Nothing here is required.** Ringba keeps working untouched; every parameter
+below is optional and additive, and Ringba is being retired program by program
+anyway. Owner's decisions, 4 Sep 2026:
 
-Four edits to **both** `RingbaToSupaGglOfflineCV-Monet` and `-Xfer`:
+| change | verdict |
+|---|---|
+| `&offer=<offer>` | **Optional.** `ib_source` already separates internet from non-internet, which was the original reason for wanting it. Worth adding on Caliber (zero cost, POC is building now); skip on Ringba if you don't want the churn. |
+| `&event=monetize` / `&event=transfer` | **Optional safety net.** The endpoint already determines this. Added because the first draft of the Caliber URLs had both postbacks on the transfer endpoint — a 100% silent loss. Costs one parameter to make that class of mistake recoverable. |
+| `&cv_source=ringba` | **Skip.** Inferred. `DEFAULT_SOURCE` is `ringba`, and the fallback only flips to Caliber when a `status` field is present, which Ringba never sends. The per-call dedupe grain resolves identically either way. |
+| `pub=` → `publisher=` | **Skip.** `pub` and `Pub` are both accepted variants. |
 
-1. **`pub=` → `publisher=`.** Both are accepted by the backend (`pub` is in the
-   variant list) so this is cosmetic consistency with the Caliber spec, not a
-   fix. Do it while you are in there.
-2. **Add `&program=<program>`** — `aca`, `energy`, etc., matching the campaign
-   the pixel is attached to. This is the one that actually buys something.
-3. **Add `&event=conversion`** to `-Monet` and **`&event=transfer`** to `-Xfer`.
-   Belt-and-braces: it makes the pixel say what it is rather than relying on
-   which URL it was pasted into.
-4. **Remove the stray space in `-Monet`.** The pixel currently reads:
+### ⚠️ `&ib_source=` — valuable, but ORDER MATTERS
 
-   ```
-   ...&email=[tag:User:email] &ib_source=[tag:User:ib_source]...
-   ```
+Adding `ib_source` is the highest-value change available to these pixels (§2),
+and it is now safe — **but only after the deny-list migration is applied.**
 
-   **This is currently harmless — verified, not assumed.** Of 1,966 Ringba
-   monetized events carrying an email in the last 7 days, **0** have trailing
-   whitespace in `caller_email`, so Ringba is stripping the space before it
-   fires. Two further layers would have caught it anyway: `normalizeEmail()` in
-   the uploader lower-cases *and* trims before hashing, so the Enhanced
-   Conversions identifier would have matched regardless.
+The Ringba pixels currently send no `utm_source` **and** no `ib_source`. Both
+blank is the *only* reason these rows pass the upload gate today, via the
+both-blank catch-all. Under the OLD rule, adding `ib_source` would have made
+them "identified as not-Google" and they would have **stopped uploading
+silently**. The new deny-list treats an unrecognised value as unknown, and
+unknown uploads — which is what makes this safe.
 
-   Tidy it up on the general principle that a query string should not contain
-   raw spaces, but **do not treat it as a defect to chase** — it costs nothing
-   today, and the only real exposure is if Ringba's stripping behaviour ever
-   changed at the same time as someone removed the uploader's `.trim()`.
+**Do not add `ib_source` to any Ringba pixel before the migration lands.**
 
-Corrected `-Monet` (Fire on Convert), space removed and new params added:
+### `-Monet`, with the optional parameters applied
 
 ```
-https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-conversion-webhook?secret=<secret>&cv_source=ringba&event=conversion&program=<program>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_value=[Call:ConversionAmount]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&trusted_form=[tag:User:trusted_form]
+https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-conversion-webhook?secret=<secret>&event=monetize&offer=<offer>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_value=[Call:ConversionAmount]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&pub=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&zip=[tag:User:zipcode]&state=[tag:User:state]&address=[tag:User:address]
 ```
 
-Corrected `-Xfer` (Fire on Connect):
+`-Xfer` takes the same two additions with `&event=transfer`.
 
-```
-https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-transfer-webhook?secret=<secret>&cv_source=ringba&event=transfer&program=<program>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&landing_page=[tag:User:landing_page]&campaignid=[tag:User:campaignid]&adgroupid=[tag:User:adgroupid]&network=[tag:User:network]&creative=[tag:User:creative]&target=[tag:User:targetid]&useragent=[tag:User:useragent]&state=[tag:User:state]&msclkid=[tag:User:msclkid]&oppref=[tag:User:oppref]&address=[tag:User:address]
-```
+**Energy's Ringba pixels need nothing** — Energy is leaving Ringba. Disable them
+at cutover rather than updating them.
 
-> `cv_source=ringba` is added explicitly. Ringba is already the default when no
-> source is declared, so this changes nothing today — but it removes the
-> dependence on a default, and it is what makes the per-call dedupe grain
-> explicit rather than inferred. Note the name-token problem in §1 above is
-> unrelated and still applies to both of these.
+### Timing
 
-**Also still true:** these pixels send no `utm_source` and no `ib_source` on
-most campaigns. Under the old upload rule that was *load-bearing* — it is what
-put them in the both-blank catch-all that made them eligible. Under the new rule
-(see `CALIBER-CUTOVER.md`) unknown still uploads, so adding `ib_source` here is
-now safe. It was not safe before.
+- `offer` / `event`: after the new functions are deployed. Before that they are
+  ignored — harmless, just inert.
+- `ib_source`: after the migration is applied. See the warning above.
 
 ---
 
