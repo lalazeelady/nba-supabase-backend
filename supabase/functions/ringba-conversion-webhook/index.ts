@@ -107,6 +107,18 @@ const FIELD_VARIANTS = {
   caller_city: ["city", "City", "caller_city", "callerCity"],
   ip_address: ["ip_address", "ipAddress", "ip", "client_ip", "clientIp"],
   user_agent: ["user_agent", "userAgent", "ua"],
+  // Funnel variant the lead came through. Backfilled from the matched lead below.
+  landing_page: ["landing_page", "landingPage", "lp"],
+  // Google Ads ValueTrack. These originate on the AD LANDING URL, travel
+  // funnel -> leads -> CallTools -> Ringba enrich -> pixel. Accept the pixel's
+  // short names and snake_case so either convention lands.
+  // NOTE: `campaignid` is ALSO the CallTools dialer campaign in the enrich URL.
+  // Keep the Google one on a distinct Ringba tag or this fills with dialer ids.
+  campaign_id: ["campaign_id", "campaignid", "campaignId", "gads_campaignid"],
+  adgroup_id: ["adgroup_id", "adgroupid", "adgroupId", "gads_adgroupid"],
+  creative_id: ["creative_id", "creative", "creativeid", "gads_creative"],
+  target_id: ["target_id", "target", "targetid", "targetId", "gads_targetid"],
+  network: ["network", "gads_network"],
   publisher: [
     "pub", "Pub",
     "publisher", "Publisher", "publisher_name", "publisherName",
@@ -287,6 +299,7 @@ type LeadAttr = {
   city: string | null;
   ip_address: string | null;
   user_agent: string | null;
+  landing_page: string | null;
 };
 
 async function matchLead(
@@ -443,6 +456,12 @@ Deno.serve(async (req: Request) => {
   const caller_city = pick(merged, FIELD_VARIANTS.caller_city);
   const ip_address = pick(merged, FIELD_VARIANTS.ip_address);
   const user_agent = pick(merged, FIELD_VARIANTS.user_agent);
+  const landing_page = pick(merged, FIELD_VARIANTS.landing_page);
+  const campaign_id = pick(merged, FIELD_VARIANTS.campaign_id);
+  const adgroup_id = pick(merged, FIELD_VARIANTS.adgroup_id);
+  const creative_id = pick(merged, FIELD_VARIANTS.creative_id);
+  const target_id = pick(merged, FIELD_VARIANTS.target_id);
+  const network = pick(merged, FIELD_VARIANTS.network);
   const publisher = pick(merged, FIELD_VARIANTS.publisher);
   const utm_source = pick(merged, FIELD_VARIANTS.utm_source);
   const utm_medium = pick(merged, FIELD_VARIANTS.utm_medium);
@@ -526,7 +545,7 @@ Deno.serve(async (req: Request) => {
   if (match.lead_id) {
     const { data } = await supabase
       .from("leads")
-      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, street_address, city, ip_address, user_agent")
+      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, street_address, city, ip_address, user_agent, landing_page")
       .eq("id", match.lead_id)
       .maybeSingle();
     leadAttr = (data as unknown as LeadAttr) ?? null;
@@ -549,6 +568,7 @@ Deno.serve(async (req: Request) => {
   const eff_caller_city = nz(caller_city) ?? nz(leadAttr?.city) ?? null;
   const eff_ip_address = nz(ip_address) ?? nz(leadAttr?.ip_address) ?? null;
   const eff_user_agent = nz(user_agent) ?? nz(leadAttr?.user_agent) ?? null;
+  const eff_landing_page = nz(landing_page) ?? nz(leadAttr?.landing_page) ?? null;
 
   const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
   // ECL-eligible: we have either matched a lead (so the uploader will pull
@@ -610,6 +630,12 @@ Deno.serve(async (req: Request) => {
         caller_city: eff_caller_city,
         ip_address: eff_ip_address,
         user_agent: eff_user_agent,
+        landing_page: eff_landing_page,
+        campaign_id,
+        adgroup_id,
+        creative_id,
+        target_id,
+        network,
         publisher,
         utm_source: eff_utm_source,
         utm_medium: eff_utm_medium,
