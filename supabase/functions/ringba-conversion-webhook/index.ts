@@ -97,6 +97,8 @@ const FIELD_VARIANTS = {
   caller_zip: [
     "zip", "zip_code", "zipCode", "postal_code", "postalCode",
   ],
+  // NOTE: this is the state the LEAD gave us, not the state of the inbound
+  // number they dialled.
   caller_state: [
     "state", "region", "regionCode", "region_code",
   ],
@@ -106,7 +108,7 @@ const FIELD_VARIANTS = {
   caller_address: ["address", "street", "street_address", "streetAddress", "address1"],
   caller_city: ["city", "City", "caller_city", "callerCity"],
   ip_address: ["ip_address", "ipAddress", "ip", "client_ip", "clientIp"],
-  user_agent: ["user_agent", "userAgent", "ua"],
+  user_agent: ["user_agent", "userAgent", "useragent", "ua"],
   // Funnel variant the lead came through. Backfilled from the matched lead below.
   landing_page: ["landing_page", "landingPage", "lp"],
   // Google Ads ValueTrack. These originate on the AD LANDING URL, travel
@@ -120,8 +122,8 @@ const FIELD_VARIANTS = {
   target_id: ["target_id", "target", "targetid", "targetId", "gads_targetid"],
   network: ["network", "gads_network"],
   publisher: [
-    "pub", "Pub",
     "publisher", "Publisher", "publisher_name", "publisherName",
+    "pub", "Pub",
     "tag:Publisher:Name", "tag:Publisher:name",
   ],
   // UTM parameters, if CallTools/Ringba forwards them on the transfer. Stored
@@ -143,6 +145,9 @@ const FIELD_VARIANTS = {
   call_type: ["call_type", "callType"],
   // Caliber call status (connected / no connect / ...). Its PRESENCE marks a Caliber fire.
   call_status: ["status", "Status", "call_status", "callStatus"],
+  // Which platform is posting, and a declaration that the sender manages its
+  // own transfer events. `cv_source` (conversion source) is the canonical name.
+  source: ["cv_source", "source", "src", "platform"],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -245,7 +250,7 @@ function etDate(d: Date): string {
 // Falls back to click:time (+value for non-caliber) when the primary key is absent.
 function buildDedupeKey(args: {
   source: string;
-  is_caliber: boolean;
+  collapsePhoneDay: boolean;
   conversion_call_id: string | null;
   caller_id: string | null;
   gclid: string | null;
@@ -255,7 +260,7 @@ function buildDedupeKey(args: {
   conversion_value: number;
 }): string {
   const p = `${args.source}:${EVENT_TYPE}`;
-  if (args.is_caliber) {
+  if (args.collapsePhoneDay) {
     // Caliber internet: dedupe phone + ET-day (collapse same-day multi-fires). conversion_call_id
     // is still stored as an identifier, just not the dedupe key. call id / click:time are
     // fallbacks only when no phone is present.
@@ -422,11 +427,26 @@ Deno.serve(async (req: Request) => {
   // Caliber is detected by the PRESENCE of its `status` field, which Ringba/CallTools never
   // send. Caliber rows are ingested (visible) but held OUT of Google upload by the export view
   // until cutover (source <> 'caliber'); 'no connect' fires are dropped below before any dedup.
+  // Prefer an EXPLICIT source param — the presence-of-`status` heuristic below
+  // predates it and is fragile: any platform that happens to send a `status`
+  // field gets filed as Caliber. Kept as a fallback so the existing Caliber
+  // pixel keeps working unchanged until it is migrated to send source=caliber.
   const CALL_STATUS_KEYS = ["status", "Status", "call_status", "callStatus"];
-  const is_caliber = CALL_STATUS_KEYS.some((k) =>
-    Object.prototype.hasOwnProperty.call(merged, k)
-  );
-  const source = is_caliber ? "caliber" : DEFAULT_SOURCE;
+  const claimedSource = (pick(merged, FIELD_VARIANTS.source) || "").trim().toLowerCase();
+  const source = ["ringba", "caliber", "calltools"].includes(claimedSource)
+    ? claimedSource
+    : (CALL_STATUS_KEYS.some((k) => Object.prototype.hasOwnProperty.call(merged, k))
+        ? "caliber"
+        : DEFAULT_SOURCE);
+  const is_caliber = source === "caliber";
+  // A sender that DECLARES cv_source fires a real postback per call, so its
+  // events are per-call. Only the legacy Caliber pixel — which declares nothing
+  // and whose events are reconstructed from an agent disposition — keeps the
+  // phone + ET-day collapse. This must stay in step with
+  // set_offline_conversion_order_id(), or the row grain and the Google
+  // transactionId grain disagree and Google silently merges real conversions.
+  const declaredSource = ["ringba", "caliber", "calltools"].includes(claimedSource);
+  const collapsePhoneDay = is_caliber && !declaredSource;
 
   const conversion_call_id = pick(merged, FIELD_VARIANTS.conversion_call_id);
   const calltools_call_id = pick(merged, FIELD_VARIANTS.calltools_call_id);
@@ -497,7 +517,11 @@ Deno.serve(async (req: Request) => {
       error_message: null,
     });
     return new Response(
-      JSON.stringify({ ok: true, stored: false, skipped: "non-nba-publisher" }),
+      JSON.stringify({
+        ok: true, stored: false, skipped: "non-nba-publisher",
+        publisher_received: publisher || null,
+        hint: "publisher must be exactly 'NBA'; tell the NBA team the value you send and they will map it",
+      }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
@@ -522,7 +546,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const dedupe_key = buildDedupeKey({
-    source, is_caliber,
+    source, collapsePhoneDay,
     conversion_call_id, caller_id,
     gclid, gbraid, wbraid,
     conversion_time,
@@ -718,6 +742,7 @@ Deno.serve(async (req: Request) => {
       event_id: eventId,
       inserted,
       status,
+      cv_source: source,
       matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },

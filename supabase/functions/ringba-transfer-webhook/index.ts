@@ -37,7 +37,10 @@ const corsHeaders = {
     "Content-Type, Authorization, X-Client-Info, Apikey, x-webhook-secret, x-invoke-secret",
 };
 
-const SOURCE = "ringba";
+// Default source. Overridden per-request by an explicit `source` param so a
+// non-Ringba platform (Caliber, during the Ringba->Caliber migration) can post
+// here and be labelled correctly instead of masquerading as Ringba.
+const DEFAULT_SOURCE = "ringba";
 const EVENT_TYPE = "call_transferred";
 const CONVERSION_NAME = "CallXfer";
 
@@ -116,6 +119,11 @@ const FIELD_VARIANTS = {
   agent_name: ["agent_name", "agentName", "agent"],
   queue: ["queue", "queue_name", "queueName", "queue_id", "queueId", "queueid"],
   call_type: ["call_type", "callType"],
+  // Which platform is posting, and — critically — a declaration that the sender
+  // manages its own transfer events. `cv_source` (conversion source) is the
+  // canonical name; the others are accepted so nothing breaks if an older
+  // integration sends them. Whitelisted below.
+  source: ["cv_source", "source", "src", "platform"],
 } as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
@@ -187,7 +195,19 @@ function etDate(d: Date): string {
 // every qualified transfer is counted, matching Ringba's gross transfer count. Only re-fires
 // of the SAME call (same id) collapse. Phone+ET-day is a fallback used only when a transfer
 // arrives with no call id, so an anonymous transfer is never merged with a different call id.
+//
+// INTERNET SOURCES (Caliber, CallTools) USE A DIFFERENT GRAIN ON PURPOSE.
+// derive_internet_transfer_event() also creates a call_transferred row from a
+// revenue event whose conversion_call_id isn't an 'RGB…' id, keyed on
+// `<source>:call_transferred:<phone10>:<ET-day>`. If a platform posts a REAL
+// transfer here AND a revenue event that trips that trigger, the two must
+// collapse to one row or every internet transfer is counted twice. Matching the
+// trigger's grain makes whichever arrives first win and the other a no-op —
+// which is exactly what a per-campaign migration needs, since some calls will
+// have a real transfer postback and some won't.
 function buildDedupeKey(args: {
+  source: string;
+  perCall: boolean;
   conversion_call_id: string | null;
   caller_id: string | null;
   gclid: string | null;
@@ -195,15 +215,33 @@ function buildDedupeKey(args: {
   wbraid: string | null;
   conversion_time: Date;
 }): string {
-  if (args.conversion_call_id) {
-    return `${SOURCE}:${EVENT_TYPE}:${args.conversion_call_id}`;
+  const p10 = phoneLast10(args.caller_id);
+  if (args.perCall) {
+    // One row per CALL. A re-fire of the same call collapses; two genuine
+    // transfers from the same caller on the same day both count.
+    if (args.conversion_call_id) {
+      return `${args.source}:${EVENT_TYPE}:${args.conversion_call_id}`;
+    }
+    // No call id: fall back to phone + the FULL timestamp, not the day, so we
+    // still collapse an identical re-fire without merging two real transfers.
+    if (p10) {
+      return `${args.source}:${EVENT_TYPE}:${p10}:${args.conversion_time.toISOString()}`;
+    }
+    const click = args.gclid || args.gbraid || args.wbraid || "no_click";
+    return `${args.source}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
   }
-  const p = phoneLast10(args.caller_id);
-  if (p) {
-    return `${SOURCE}:${EVENT_TYPE}:${p}:${etDate(args.conversion_time)}`;
+  // LEGACY INTERNET grain: phone + ET-day. Matches derive_internet_transfer_event()
+  // so a derived row and a postback row collapse. Only for senders that do NOT
+  // declare cv_source — i.e. the old Caliber pixel, whose "transfers" are
+  // reconstructed from an agent disposition rather than a real transfer event.
+  if (p10) {
+    return `${args.source}:${EVENT_TYPE}:${p10}:${etDate(args.conversion_time)}`;
+  }
+  if (args.conversion_call_id) {
+    return `${args.source}:${EVENT_TYPE}:${args.conversion_call_id}`;
   }
   const click = args.gclid || args.gbraid || args.wbraid || "no_click";
-  return `${SOURCE}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
+  return `${args.source}:${EVENT_TYPE}:${click}:${args.conversion_time.toISOString()}`;
 }
 
 function normalizePhone(raw: string | null): string | null {
@@ -383,6 +421,18 @@ Deno.serve(async (req: Request) => {
   const queue = pick(merged, FIELD_VARIANTS.queue);
   const call_type = pick(merged, FIELD_VARIANTS.call_type);
 
+  // Explicit source, whitelisted. Anything unrecognised falls back to the
+  // default rather than writing an arbitrary string into the column.
+  const claimedSource = (pick(merged, FIELD_VARIANTS.source) || "").trim().toLowerCase();
+  const declaredSource = ["ringba", "caliber", "calltools"].includes(claimedSource);
+  const source = declaredSource ? claimedSource : DEFAULT_SOURCE;
+  // A sender that DECLARES cv_source is a modern integration firing a real
+  // per-call transfer event, so it gets the per-call dedupe grain (and the DB
+  // trigger stops deriving transfers for it). Ringba is per-call too. Only the
+  // legacy Caliber pixel — which declares nothing and whose transfers are
+  // reconstructed from an agent disposition — keeps the phone+ET-day grain.
+  const perCall = declaredSource || source === "ringba";
+
   // Transfers are a count signal: value is ALWAYS $0, regardless of any
   // conversion_value the pixel might carry.
   const conversion_value = 0;
@@ -409,6 +459,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const dedupe_key = buildDedupeKey({
+    source, perCall,
     conversion_call_id, caller_id, gclid, gbraid, wbraid, conversion_time,
   });
 
@@ -472,7 +523,7 @@ Deno.serve(async (req: Request) => {
     const { data: newRow, error: insertErr } = await supabase
       .from("offline_conversion_events")
       .insert({
-        source: SOURCE,
+        source,
         event_type: EVENT_TYPE,
         status,
         lead_id: match.lead_id,
