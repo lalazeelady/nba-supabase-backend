@@ -14,7 +14,7 @@ It is the contract; this file is the receiving side.
 
 ### 1. `event=` — the endpoint is no longer the only routing signal
 
-Both webhooks accept `event=transfer|conversion` and honour it over the URL.
+Both webhooks accept `event=transfer|monetize` and honour it over the URL.
 
 This closes a failure that would have cost 100% of Energy revenue silently. The
 first draft of the Caliber URLs had **both** postbacks pointed at

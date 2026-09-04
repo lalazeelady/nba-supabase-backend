@@ -19,7 +19,7 @@
 //   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
 // ...but those are now the DEFAULTS, not the only behaviour. An explicit
-// `event=conversion` param makes this endpoint handle a revenue event exactly
+// `event=monetize` param makes this endpoint handle a revenue event exactly
 // as ringba-conversion-webhook would. The endpoint is no longer the only thing
 // carrying that meaning, because when it was, a pixel pointed at the wrong URL
 // lost every event silently: the conversion became a call_transferred row with
@@ -58,7 +58,7 @@ const DEFAULT_SOURCE = "ringba";
 const NATIVE_EVENT = "transfer";
 
 // Everything that differs between the two event types lives here, so a request
-// that declares `event=conversion` on this endpoint is handled identically to
+// that declares `event=monetize` on this endpoint is handled identically to
 // one that arrived at ringba-conversion-webhook.
 const EVENT_SPEC = {
   transfer: {
