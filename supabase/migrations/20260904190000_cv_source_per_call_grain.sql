@@ -1,0 +1,28 @@
+-- Caliber migration (ENE first): make the row grain and the Google transactionId
+-- grain agree for senders that fire a REAL postback per call.
+--
+-- Background. offline_conversion_events had two grains:
+--   * Ringba            -> per call (conversion_call_id)
+--   * Caliber / internet -> phone + Eastern-Time day, collapsed
+-- The Caliber collapse was correct while its "transfers" were reconstructed from
+-- an agent disposition and were 1:1 with conversions. The new Caliber
+-- integration fires a real postback at transfer connection and again at
+-- monetization, so two genuine transfers from one caller on one day must both
+-- count.
+--
+-- Signal: the sender DECLARES a conversion source (cv_source). Senders that
+-- declare nothing keep every previous behaviour exactly.
+--
+-- Three places had to move together, or they silently fight each other:
+--   1. derive_internet_transfer_event()   -> stop fabricating a transfer for
+--      declared senders (they post their own).  [20260904180000]
+--   2. ringba-transfer-webhook v15 / ringba-conversion-webhook v45
+--      -> per-call dedupe_key for declared senders.
+--   3. set_offline_conversion_order_id()  -> per-call order_id for declared
+--      senders. THIS is the one that matters most: order_id is sent to Google as
+--      transactionId and Google de-duplicates on it, so leaving it on phone+day
+--      would have let Google merge two real transfers back into one even though
+--      we stored them correctly.  [this file]
+--
+-- The function body is applied via the Supabase MCP; recorded here so the repo
+-- matches production. See DECISIONS.md.

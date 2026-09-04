@@ -87,6 +87,15 @@ async function postToCaliber(args: {
   clientIp: string;
   userAgent: string;
   refererUrl: string;
+  // The single consent timestamp for this submission. Passed in (rather than
+  // generated here) so leads.consent_timestamp and the value Caliber records
+  // are the same instant — previously Caliber got a timestamp we never kept.
+  consentTimestamp: string;
+  needs: string;
+  // Server-derived age. CallTools has received this for a while; Caliber was the
+  // only destination not getting it, which was the last real asymmetry between
+  // the two parallel lead posts.
+  age: number | null;
 }): Promise<CaliberCallResult> {
   // Direct API (Caliber turned OFF HMAC 2026-08-29): authenticate with the key as a plain Bearer
   // token. The value in CALIBER_HMAC_SECRET is now used as the API key, not a signing secret
@@ -105,7 +114,7 @@ async function postToCaliber(args: {
     transaction_id: args.transactionId || undefined,
     consent: {
       given: !!args.payload.tcpa_consent,
-      timestamp: new Date().toISOString(),
+      timestamp: args.consentTimestamp,
       ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
       user_agent: args.userAgent || undefined,
       url: args.refererUrl || undefined,
@@ -151,6 +160,8 @@ async function postToCaliber(args: {
       // consent_ad_* later — required only for EU/UK, which NBA doesn't run).
       referrer: args.refererUrl || undefined,
       landing_page: args.payload.landing_page || undefined,
+      // Publisher / sub-publisher, mirroring what CallTools gets as `pubid`.
+      publisher: args.payload.publisher || undefined,
       click_timestamp: args.payload.click_timestamp || undefined,
       consent_ad_storage: args.payload.consent_ad_storage,
       consent_ad_user_data: args.payload.consent_ad_user_data,
@@ -162,9 +173,13 @@ async function postToCaliber(args: {
       // Caliber's accepted enum values, returning undefined for anything that
       // doesn't fit (omitted from the payload entirely).
       date_of_birth: args.payload.dob || undefined,
+      age: args.age ?? undefined,
       citizenship: mapCitizenshipToCaliber(args.payload.citizenship),
       employment_status: mapEmploymentStatusToCaliber(args.payload.employment_status),
       annual_household_income_range: mapAnnualIncomeToCaliber(args.payload.annual_income),
+      // Benefit interests picked on the funnel landing page. Free text, so an
+      // unrecognized field name is dropped rather than 400ing the request.
+      needs: args.needs || undefined,
     },
   };
 
@@ -309,6 +324,18 @@ interface LeadPayload {
   utm_term?: string;
   lead_source?: string;   // explicit source override (funnel-supplied, later)
   landing_page?: string;  // landing-page id: apply1 / apply2 / info01 / ... (funnel-supplied, later)
+  // Benefit interests from the landing-page tiles (food / utility / housing /
+  // other). Collected into sessionStorage on every funnel today; the funnel
+  // starts posting it in the matching site-repo change. Array or CSV string.
+  needs?: string[] | string;
+  // Publisher / sub-publisher identity, mirroring Ringba's Publisher:Name tag.
+  publisher?: string;
+  // Consent moment supplied by the funnel; falls back to submission time.
+  consent_timestamp?: string;
+  // Anti-bot time-trap, read off the payload below via `formDuration`. Declared
+  // here so it stops being an untyped `as any` read.
+  form_duration_ms?: number;
+  hp_website?: string;
 }
 
 // Best-effort lead source from utm_source until the funnel sends an explicit lead_source.
@@ -321,6 +348,24 @@ function deriveLeadSource(utmSource?: string): string | null {
   if (s.includes("openai") || s.includes("chatgpt")) return "openai";
   if (s.includes("facebook") || s.includes("meta") || s.includes("fb")) return "meta";
   return s;
+}
+
+// `needs` arrives as an array from the funnel. Store and forward it comma-joined
+// so it survives query-string postbacks and the Sheet export unchanged, and so a
+// single scalar column serves both CRMs.
+function normalizeNeeds(raw: string[] | string | undefined): string {
+  if (Array.isArray(raw)) {
+    return raw.map((n) => String(n).trim()).filter(Boolean).join(",");
+  }
+  return (raw || "").trim();
+}
+
+// Parse a funnel-supplied timestamp into an ISO string, or null when absent or
+// unparseable — never let a malformed value fail the insert.
+function toIsoOrNull(raw: string | undefined): string | null {
+  if (!raw || !String(raw).trim()) return null;
+  const d = new Date(String(raw).trim());
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 Deno.serve(async (req: Request) => {
@@ -349,8 +394,8 @@ Deno.serve(async (req: Request) => {
       "unknown";
 
     // --- Bot detection: honeypot field + time-trap ---
-    const hpWebsite = (payload as any).hp_website || "";
-    const formDuration = (payload as any).form_duration_ms ?? 0;
+    const hpWebsite = payload.hp_website || "";
+    const formDuration = payload.form_duration_ms ?? 0;
     const isBotSuspected = hpWebsite.length > 0 || formDuration < 3000;
 
     if (isBotSuspected) {
@@ -465,6 +510,17 @@ Deno.serve(async (req: Request) => {
     }
     const ageToStore = (typeof payload.age === "number" ? payload.age : computedAge) ?? null;
 
+    // Session context: read from request headers on every submission. These were
+    // handed to Caliber's consent block and then discarded; now they are persisted
+    // (our own TCPA evidence trail, and user_agent is a valid Enhanced Conversions
+    // signal for Google).
+    const userAgent = req.headers.get("user-agent") || "";
+    const refererUrl = req.headers.get("referer") || "";
+
+    // One consent timestamp per submission, shared by the leads row and Caliber.
+    const consentTimestamp = toIsoOrNull(payload.consent_timestamp) ?? new Date().toISOString();
+    const needs = normalizeNeeds(payload.needs);
+
     const { data: leadData, error: insertError } = await supabase
       .from("leads")
       .insert({
@@ -504,6 +560,22 @@ Deno.serve(async (req: Request) => {
           || deriveLeadSource(payload.utm_source)
           || null,
         landing_page: (payload.landing_page && String(payload.landing_page).trim()) || null,
+        // Click ids the funnel already captures. They reached Caliber but had no
+        // column here, so they were dropped at the insert.
+        ttclid: payload.ttclid || null,
+        li_fat_id: payload.li_fat_id || null,
+        twclid: payload.twclid || null,
+        epik: payload.epik || null,
+        // Session + consent context.
+        user_agent: userAgent || null,
+        referrer: refererUrl || null,
+        consent_timestamp: consentTimestamp,
+        click_timestamp: toIsoOrNull(payload.click_timestamp),
+        // Retained for accepted leads too, not just bot_drops — it is what lets us
+        // reconstruct how long the form actually took.
+        form_duration_ms: typeof formDuration === "number" ? formDuration : null,
+        needs: needs || null,
+        publisher: (payload.publisher && String(payload.publisher).trim()) || null,
       })
       .select()
       .single();
@@ -556,6 +628,15 @@ Deno.serve(async (req: Request) => {
       city: payload.city,
       zip_code: payload.zip,
       annual_income: ({ under_50k: 50000, "50k_75k": 75000, "76k_150k": 150000, "150k_plus": 150001 } as Record<string, number>)[payload.annual_income] ?? 0,
+      // CallTools' contact field is `employment`, not `employment_status` (confirmed
+      // from the API response echo). But `employment` is a CONSTRAINED ENUM and our
+      // form's values are not in it — live traffic on 2026-09-03 returned
+      //   400 {"employment":["\"employed_full_time\" is not a valid choice."]}
+      //   400 {"employment":["\"unemployed\" is not a valid choice."]}
+      // so we do NOT send it. Keeping the old (ignored) key preserves the previous
+      // behaviour exactly: CallTools drops it, nothing 400s, one request per lead.
+      // To actually land it we need CallTools' accepted choice list — see
+      // CONFIG-TODO.md §4. Do not "fix" this back to `employment` without that list.
       employment_status: payload.employment_status,
       first_name: payload.first_name,
       last_name: payload.last_name,
@@ -566,17 +647,41 @@ Deno.serve(async (req: Request) => {
       // CallTools side is configured to receive it under that name. The VALUE
       // is now the TrustedForm cert URL going forward.
       jornaya_lead_id: payload.trusted_form_cert_url || "",
+      // `trusted_form` is a separate real field on the contact, and it is what the
+      // Ringba enrich URL reads ({{%locals[contact][trusted_form]}}). We were only
+      // filling jornaya_lead_id, so that enrich token always resolved empty.
+      trusted_form: payload.trusted_form_cert_url || "",
       gclid: payload.gclid || payload.click_id || "",
       wbraid: payload.wbraid || "",
       gbraid: payload.gbraid || "",
       msclkid: payload.msclkid || "",
-      oppref: payload.oppref || "",
+      // Likewise `oppref_id`, not `oppref`.
+      oppref_id: payload.oppref || "",
       fbclid: payload.fbclid || "",
       utm_source: payload.utm_source || "",
       utm_medium: payload.utm_medium || "",
       utm_campaign: payload.utm_campaign || "",
       utm_content: payload.utm_content || "",
       utm_term: payload.utm_term || "",
+      // Fields CallTools did not previously receive. CallTools silently ignores a
+      // field it has no mapping for, so sending them is safe before the matching
+      // custom fields exist in the account — and they start landing the moment
+      // they do. Critically, the CallTools contact is what the Ringba enrich URL
+      // reads from ({{%locals[contact][<field>]}}), so anything missing here can
+      // never reach Ringba: this is the prerequisite for the postback gaps.
+      landing_page: payload.landing_page || "",
+      ip_address: clientIp !== "unknown" ? clientIp : "",
+      user_agent: userAgent,
+      // `consent_url` is a real contact field and is exactly what the referring
+      // funnel URL is. `referrer` is also sent for whenever a custom field is added.
+      consent_url: refererUrl,
+      referrer: refererUrl,
+      needs: needs,
+      pubid: payload.publisher || "",
+      ttclid: payload.ttclid || "",
+      li_fat_id: payload.li_fat_id || "",
+      twclid: payload.twclid || "",
+      epik: payload.epik || "",
       status: "new",
       do_not_contact: false,
       add_tags: [268591],
@@ -590,6 +695,44 @@ Deno.serve(async (req: Request) => {
       const v = crmBody[k];
       if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) {
         delete crmBody[k];
+      }
+    }
+
+    // --- 4xx fallback body -------------------------------------------------
+    // Every field name above that is NEW (either newly sent, or renamed to match
+    // the contact schema we read off the API response echo) carries a small risk:
+    // if CallTools treats one as a constrained enum rather than free text, it
+    // answers 400 and — since 4xx is deliberately not retried — the lead is lost.
+    // That is not an acceptable trade for an attribution improvement.
+    //
+    // So we keep a fallback: the exact field set that has been posting
+    // successfully for months. On a 4xx we retry ONCE with it. Worst case we lose
+    // the new fields on that lead; we never lose the lead. This also makes the
+    // CallTools custom-field rollout in CONFIG-TODO.md safe to do live.
+    const NEW_CRM_FIELDS = [
+      "oppref_id", "trusted_form", "consent_url",
+      "landing_page", "ip_address", "user_agent", "referrer", "needs", "pubid",
+      "ttclid", "li_fat_id", "twclid", "epik",
+    ];
+    const crmBodySafe: Record<string, unknown> = { ...crmBody };
+    for (const k of NEW_CRM_FIELDS) delete crmBodySafe[k];
+    // Restore the pre-branch name so the fallback is byte-for-byte the old payload.
+    if (payload.oppref) crmBodySafe.oppref = payload.oppref;
+
+    // CallTools reports rejections per field, DRF-style:
+    //   {"employment":["\"unemployed\" is not a valid choice."]}
+    // so on a 400 we can strip exactly the offending field(s) and keep everything
+    // else, instead of dropping all the new fields. Only strips keys we added in
+    // this branch — a rejection on a long-standing field is a real bug and should
+    // surface, not be silently papered over.
+    const strippableOnReject = new Set(NEW_CRM_FIELDS);
+    function fieldsRejectedBy(rawBody: string): string[] {
+      try {
+        const parsed = JSON.parse(rawBody);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+        return Object.keys(parsed).filter((k) => strippableOnReject.has(k));
+      } catch {
+        return [];
       }
     }
 
@@ -622,8 +765,17 @@ Deno.serve(async (req: Request) => {
       let error: string | null = null;
       const MAX_ATTEMPTS = 3;
       const ATTEMPT_TIMEOUT_MS = 10000;
+      // Swapped to crmBodySafe after a 4xx (once). See the note above crmBodySafe.
+      let usingSafeBody = false;
+      let attemptsUsed = 0;
+      // Bound the strip-and-retry loop. Each round removes at least one field so it
+      // terminates on its own, but a cap keeps a pathological response from turning
+      // one submission into a dozen CallTools calls.
+      let stripRounds = 0;
+      const MAX_STRIP_ROUNDS = 3;
 
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attemptsUsed = attempt;
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), ATTEMPT_TIMEOUT_MS);
         try {
@@ -633,7 +785,7 @@ Deno.serve(async (req: Request) => {
               "Authorization": `Token ${calltoolsToken}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify(crmBody),
+            body: JSON.stringify(usingSafeBody ? crmBodySafe : crmBody),
             signal: ac.signal,
           });
           status = result.status;
@@ -665,8 +817,30 @@ Deno.serve(async (req: Request) => {
           // Non-2xx. Capture the actual body (HTML error page or JSON string)
           // so api_logs/the alert show what CallTools really returned.
           error = `CallTools HTTP ${status}: ${rawBody.slice(0, 300)}`;
-          // Only retry 5xx (transient server-side). 4xx is our request's fault.
-          if (status < 500) break;
+          // 4xx is our request's fault, so a plain retry is pointless — but a
+          // retry with the known-good field set is not. Do that once, then stop.
+          if (status < 500) {
+            // First choice: drop only the field(s) CallTools actually named.
+            const rejected = fieldsRejectedBy(rawBody).filter((k) => k in crmBody);
+            if (rejected.length > 0 && stripRounds < MAX_STRIP_ROUNDS) {
+              stripRounds++;
+              console.warn("CallTools rejected field(s); dropping and retrying:", rejected.join(", "));
+              for (const k of rejected) delete crmBody[k];
+              attempt--;
+              continue;
+            }
+            // Otherwise fall back to the field set that has worked for months.
+            if (!usingSafeBody) {
+              console.warn("CallTools 4xx; retrying once with the pre-branch field set:", error);
+              usingSafeBody = true;
+              // Don't let the fallback consume a retry slot — otherwise a 4xx
+              // arriving on the final attempt would set the flag and never use
+              // it. Can only happen once, since usingSafeBody is now true.
+              attempt--;
+              continue;
+            }
+            break;
+          }
         } catch (e) {
           // Network-level error, or our per-attempt timeout fired (AbortError).
           console.error("CRM API error:", e);
@@ -686,7 +860,7 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      return { success, response, status, leadId, action, error };
+      return { success, response, status, leadId, action, error, usedSafeBody: usingSafeBody, attempts: attemptsUsed };
     })();
 
     const caliberPromise = postToCaliber({
@@ -694,8 +868,11 @@ Deno.serve(async (req: Request) => {
       transactionId,
       payload,
       clientIp,
-      userAgent: req.headers.get("user-agent") || "",
-      refererUrl: req.headers.get("referer") || "",
+      userAgent,
+      refererUrl,
+      consentTimestamp,
+      needs,
+      age: ageToStore,
     });
 
     const [crmResult, caliberResult] = await Promise.all([calltoolsPromise, caliberPromise]);
@@ -712,8 +889,10 @@ Deno.serve(async (req: Request) => {
       lead_id: leadData.id,
       transaction_id: transactionId,
       caller_id: phoneFormatted,
-      request_payload: crmBody,
-      response_payload: crmResponse,
+      request_payload: crmResult.usedSafeBody ? crmBodySafe : crmBody,
+      response_payload: crmResult.usedSafeBody
+        ? { ...(crmResponse as object || {}), _nba_note: "retried without new fields after a 4xx" }
+        : crmResponse,
       http_status: crmStatus,
       success: crmSuccess,
       error_message: errorMessage,

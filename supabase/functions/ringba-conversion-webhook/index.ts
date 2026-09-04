@@ -9,6 +9,19 @@
 // so a slow/flaky Google API call cannot block Ringba's postback retry
 // behavior.
 //
+// Despite the name this is NOT Ringba-only, and NOT conversion-only:
+//   - `cv_source` lets any platform post here (Caliber, during the migration).
+//     Default stays 'ringba' so existing pixels are unaffected.
+//   - `event=transfer` makes this endpoint handle a transfer exactly as
+//     ringba-transfer-webhook would, and vice versa. The endpoint used to be
+//     the ONLY carrier of that meaning, which made a pixel pointed at the wrong
+//     URL a total silent loss: the event took on the other type, collided with
+//     that type's dedupe_key, and no-opped behind an {ok:true}. See
+//     resolveEvent() / EVENT_SPEC.
+//   - `program` (energy / aca / internet / ...) is carried per event. Before it,
+//     every Caliber row was filed as internet, so Energy would have gone
+//     invisible in reporting the moment it migrated.
+//
 // Auth: shared secret in either the `x-webhook-secret` header or `?secret=`
 // query string, compared against the RINGBA_WEBHOOK_SECRET edge function
 // secret. Always returns 200 once the secret has been accepted, so Ringba
@@ -36,7 +49,47 @@ const corsHeaders = {
 // Default source; overridden to 'caliber' per-request when the Caliber-only `status`
 // field is present (see the is_caliber check in the handler).
 const DEFAULT_SOURCE = "ringba";
-const EVENT_TYPE = "call_converted_revenue";
+
+// This endpoint's NATIVE event. An explicit `event=` param overrides it, so a
+// pixel pointed at the wrong URL is recorded correctly instead of being
+// swallowed as a duplicate of the other event. Mirrors ringba-transfer-webhook.
+const NATIVE_EVENT = "conversion";
+
+const EVENT_SPEC = {
+  transfer: {
+    event_type: "call_transferred",
+    conversion_name: "CallXfer",
+    action_id_env: "GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_TRANSFERRED",
+    log_tag: "xfr",
+  },
+  conversion: {
+    event_type: "call_converted_revenue",
+    conversion_name: "CallConvertOffline",
+    action_id_env: "GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE",
+    log_tag: "cco",
+  },
+} as const;
+
+type EventKind = keyof typeof EVENT_SPEC;
+
+function resolveEvent(raw: string | null): EventKind {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "conversion" || v === "call_converted_revenue" || v === "monetize" || v === "revenue") {
+    return "conversion";
+  }
+  if (v === "transfer" || v === "call_transferred" || v === "xfer") return "transfer";
+  return NATIVE_EVENT;
+}
+
+// Programs we recognise. An unrecognised value is still stored verbatim — a
+// typo must never cost the event — but only these are treated as canonical.
+const KNOWN_PROGRAMS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
+
+function normalizeProgram(raw: string | null): string | null {
+  const v = (raw || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!v) return null;
+  return KNOWN_PROGRAMS.includes(v) ? v : v.slice(0, 40);
+}
 
 // Field-name variants we accept. First non-empty value wins. `conversion_call_id` holds the
 // call id of the CONVERTED call: Ringba (RGB…), Caliber (`call_id`), or CallTools interim id.
@@ -97,12 +150,33 @@ const FIELD_VARIANTS = {
   caller_zip: [
     "zip", "zip_code", "zipCode", "postal_code", "postalCode",
   ],
+  // NOTE: this is the state the LEAD gave us, not the state of the inbound
+  // number they dialled.
   caller_state: [
     "state", "region", "regionCode", "region_code",
   ],
+  // Ringba sends `address` and `ip_address` on every postback; neither had a
+  // variant list, so both were readable only via raw_payload. `city` and
+  // `user_agent` are plumbed for the pixel-token additions in CONFIG-TODO.md.
+  caller_address: ["address", "street", "street_address", "streetAddress", "address1"],
+  caller_city: ["city", "City", "caller_city", "callerCity"],
+  ip_address: ["ip_address", "ipAddress", "ip", "client_ip", "clientIp"],
+  user_agent: ["user_agent", "userAgent", "useragent", "ua"],
+  // Funnel variant the lead came through. Backfilled from the matched lead below.
+  landing_page: ["landing_page", "landingPage", "lp"],
+  // Google Ads ValueTrack. These originate on the AD LANDING URL, travel
+  // funnel -> leads -> CallTools -> Ringba enrich -> pixel. Accept the pixel's
+  // short names and snake_case so either convention lands.
+  // NOTE: `campaignid` is ALSO the CallTools dialer campaign in the enrich URL.
+  // Keep the Google one on a distinct Ringba tag or this fills with dialer ids.
+  campaign_id: ["campaign_id", "campaignid", "campaignId", "gads_campaignid"],
+  adgroup_id: ["adgroup_id", "adgroupid", "adgroupId", "gads_adgroupid"],
+  creative_id: ["creative_id", "creative", "creativeid", "gads_creative"],
+  target_id: ["target_id", "target", "targetid", "targetId", "gads_targetid"],
+  network: ["network", "gads_network"],
   publisher: [
-    "pub", "Pub",
     "publisher", "Publisher", "publisher_name", "publisherName",
+    "pub", "Pub",
     "tag:Publisher:Name", "tag:Publisher:name",
   ],
   // UTM parameters, if CallTools/Ringba forwards them on the transfer. Stored
@@ -124,12 +198,31 @@ const FIELD_VARIANTS = {
   call_type: ["call_type", "callType"],
   // Caliber call status (connected / no connect / ...). Its PRESENCE marks a Caliber fire.
   call_status: ["status", "Status", "call_status", "callStatus"],
+  // Which platform is posting, and a declaration that the sender manages its
+  // own transfer events. `cv_source` (conversion source) is the canonical name.
+  source: ["cv_source", "source", "src", "platform"],
+  // Which of the two events this is, independent of which URL it arrived at.
+  event: ["event", "event_type", "eventType", "cv_event"],
+  // Which campaign the call belongs to (energy / aca / internet / ...).
+  program: ["program", "campaign_program", "vertical", "product"],
 } as const;
+
+// An unresolved template token — "[tag:User:gclid]", "{{contact.email}}" — is
+// worse than a missing value: it looks like data. A literal gclid of
+// "[tag:User:gclid]" would be stored, matched against and uploaded as if real.
+// Treat any wholly-templated value as absent.
+function isUnresolvedToken(v: string): boolean {
+  const t = v.trim();
+  return /^\[[^\]]*\]$/.test(t) || /^\{\{.*\}\}$/.test(t) || /^%[A-Za-z_]+%$/.test(t);
+}
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const k of keys) {
     const v = obj[k];
-    if (v !== undefined && v !== null && String(v).length > 0) return String(v);
+    if (v === undefined || v === null) continue;
+    const s = String(v);
+    if (s.length === 0 || isUnresolvedToken(s)) continue;
+    return s;
   }
   return null;
 }
@@ -226,7 +319,8 @@ function etDate(d: Date): string {
 // Falls back to click:time (+value for non-caliber) when the primary key is absent.
 function buildDedupeKey(args: {
   source: string;
-  is_caliber: boolean;
+  event_type: string;
+  collapsePhoneDay: boolean;
   conversion_call_id: string | null;
   caller_id: string | null;
   gclid: string | null;
@@ -235,8 +329,8 @@ function buildDedupeKey(args: {
   conversion_time: Date;
   conversion_value: number;
 }): string {
-  const p = `${args.source}:${EVENT_TYPE}`;
-  if (args.is_caliber) {
+  const p = `${args.source}:${args.event_type}`;
+  if (args.collapsePhoneDay) {
     // Caliber internet: dedupe phone + ET-day (collapse same-day multi-fires). conversion_call_id
     // is still stored as an identifier, just not the dedupe key. call id / click:time are
     // fallbacks only when no phone is present.
@@ -276,6 +370,11 @@ type LeadAttr = {
   utm_campaign: string | null;
   utm_content: string | null;
   utm_term: string | null;
+  street_address: string | null;
+  city: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  landing_page: string | null;
 };
 
 async function matchLead(
@@ -398,11 +497,32 @@ Deno.serve(async (req: Request) => {
   // Caliber is detected by the PRESENCE of its `status` field, which Ringba/CallTools never
   // send. Caliber rows are ingested (visible) but held OUT of Google upload by the export view
   // until cutover (source <> 'caliber'); 'no connect' fires are dropped below before any dedup.
+  // Prefer an EXPLICIT source param — the presence-of-`status` heuristic below
+  // predates it and is fragile: any platform that happens to send a `status`
+  // field gets filed as Caliber. Kept as a fallback so the existing Caliber
+  // pixel keeps working unchanged until it is migrated to send source=caliber.
+  // Which event this actually is, endpoint notwithstanding.
+  const eventKind = resolveEvent(pick(merged, FIELD_VARIANTS.event));
+  const spec = EVENT_SPEC[eventKind];
+  const EVENT_TYPE = spec.event_type;
+  const program = normalizeProgram(pick(merged, FIELD_VARIANTS.program));
+
   const CALL_STATUS_KEYS = ["status", "Status", "call_status", "callStatus"];
-  const is_caliber = CALL_STATUS_KEYS.some((k) =>
-    Object.prototype.hasOwnProperty.call(merged, k)
-  );
-  const source = is_caliber ? "caliber" : DEFAULT_SOURCE;
+  const claimedSource = (pick(merged, FIELD_VARIANTS.source) || "").trim().toLowerCase();
+  const source = ["ringba", "caliber", "calltools"].includes(claimedSource)
+    ? claimedSource
+    : (CALL_STATUS_KEYS.some((k) => Object.prototype.hasOwnProperty.call(merged, k))
+        ? "caliber"
+        : DEFAULT_SOURCE);
+  const is_caliber = source === "caliber";
+  // A sender that DECLARES cv_source fires a real postback per call, so its
+  // events are per-call. Only the legacy Caliber pixel — which declares nothing
+  // and whose events are reconstructed from an agent disposition — keeps the
+  // phone + ET-day collapse. This must stay in step with
+  // set_offline_conversion_order_id(), or the row grain and the Google
+  // transactionId grain disagree and Google silently merges real conversions.
+  const declaredSource = ["ringba", "caliber", "calltools"].includes(claimedSource);
+  const collapsePhoneDay = is_caliber && !declaredSource;
 
   const conversion_call_id = pick(merged, FIELD_VARIANTS.conversion_call_id);
   const calltools_call_id = pick(merged, FIELD_VARIANTS.calltools_call_id);
@@ -412,7 +532,12 @@ Deno.serve(async (req: Request) => {
   const wbraid = pick(merged, FIELD_VARIANTS.wbraid);
   const transaction_id = pick(merged, FIELD_VARIANTS.transaction_id);
   const claimed_lead_id = pick(merged, FIELD_VARIANTS.lead_id);
-  const conversion_value = parseNumber(pick(merged, FIELD_VARIANTS.conversion_value)) ?? 0;
+  // A declared transfer is a count signal and is forced to $0, matching
+  // ringba-transfer-webhook, so a mis-pointed transfer pixel cannot inject a
+  // buyer payout into the revenue action.
+  const conversion_value = eventKind === "transfer"
+    ? 0
+    : (parseNumber(pick(merged, FIELD_VARIANTS.conversion_value)) ?? 0);
   const parsedConvTime = parseTimestamp(pick(merged, FIELD_VARIANTS.conversion_time));
   // Defend against Ringba sending "1/1/0001 12:00:00 AM" for missing
   // ConvertedTime tags (V8 mangles year 0001 into 2001). If the parsed
@@ -428,6 +553,16 @@ Deno.serve(async (req: Request) => {
   const caller_last_name = pick(merged, FIELD_VARIANTS.caller_last_name);
   const caller_zip = pick(merged, FIELD_VARIANTS.caller_zip);
   const caller_state = pick(merged, FIELD_VARIANTS.caller_state);
+  const caller_address = pick(merged, FIELD_VARIANTS.caller_address);
+  const caller_city = pick(merged, FIELD_VARIANTS.caller_city);
+  const ip_address = pick(merged, FIELD_VARIANTS.ip_address);
+  const user_agent = pick(merged, FIELD_VARIANTS.user_agent);
+  const landing_page = pick(merged, FIELD_VARIANTS.landing_page);
+  const campaign_id = pick(merged, FIELD_VARIANTS.campaign_id);
+  const adgroup_id = pick(merged, FIELD_VARIANTS.adgroup_id);
+  const creative_id = pick(merged, FIELD_VARIANTS.creative_id);
+  const target_id = pick(merged, FIELD_VARIANTS.target_id);
+  const network = pick(merged, FIELD_VARIANTS.network);
   const publisher = pick(merged, FIELD_VARIANTS.publisher);
   const utm_source = pick(merged, FIELD_VARIANTS.utm_source);
   const utm_medium = pick(merged, FIELD_VARIANTS.utm_medium);
@@ -457,20 +592,28 @@ Deno.serve(async (req: Request) => {
         skipped: true,
         reason: "non-nba-publisher",
         publisher: publisher || null,
+        cv_source: source, program, event: eventKind,
       } as object,
       http_status: 200,
       success: true,
       error_message: null,
     });
     return new Response(
-      JSON.stringify({ ok: true, stored: false, skipped: "non-nba-publisher" }),
+      JSON.stringify({
+        ok: true, stored: false, skipped: "non-nba-publisher",
+        publisher_received: publisher || null,
+        hint: "publisher must be exactly 'NBA'; tell the NBA team the value you send and they will map it",
+      }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 
   // Caliber "no connect" fires are not real transfers/monetizations — drop them BEFORE dedup
   // (owner's rule). Logged for visibility; no event row, so no derived transfer either.
-  if (is_caliber && call_status && /no[\s_-]*connect/i.test(call_status)) {
+  // Not gated on is_caliber any more: Ringba never sends a status field, so this
+  // is a no-op for it, and gating meant a Caliber pixel that correctly declared
+  // cv_source could still slip a "no connect" through if source resolution moved.
+  if (call_status && /no[\s_-]*connect/i.test(call_status)) {
     await supabase.from("api_logs").insert({
       lead_id: null,
       transaction_id: transaction_id || conversion_call_id || "caliber-unknown",
@@ -488,7 +631,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const dedupe_key = buildDedupeKey({
-    source, is_caliber,
+    source, event_type: EVENT_TYPE, collapsePhoneDay,
     conversion_call_id, caller_id,
     gclid, gbraid, wbraid,
     conversion_time,
@@ -511,7 +654,7 @@ Deno.serve(async (req: Request) => {
   if (match.lead_id) {
     const { data } = await supabase
       .from("leads")
-      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term")
+      .select("transaction_id, gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_content, utm_term, street_address, city, ip_address, user_agent, landing_page")
       .eq("id", match.lead_id)
       .maybeSingle();
     leadAttr = (data as unknown as LeadAttr) ?? null;
@@ -527,6 +670,14 @@ Deno.serve(async (req: Request) => {
   const eff_utm_campaign = nz(utm_campaign) ?? nz(leadAttr?.utm_campaign) ?? null;
   const eff_utm_content = nz(utm_content) ?? nz(leadAttr?.utm_content) ?? null;
   const eff_utm_term = nz(utm_term) ?? nz(leadAttr?.utm_term) ?? null;
+  // Caller context. The Ringba pixel's ip_address token resolves empty today
+  // (CallTools has no ip_address on the contact for the enrich URL to read), so
+  // in practice these come from the matched lead until CONFIG-TODO.md is done.
+  const eff_caller_address = nz(caller_address) ?? nz(leadAttr?.street_address) ?? null;
+  const eff_caller_city = nz(caller_city) ?? nz(leadAttr?.city) ?? null;
+  const eff_ip_address = nz(ip_address) ?? nz(leadAttr?.ip_address) ?? null;
+  const eff_user_agent = nz(user_agent) ?? nz(leadAttr?.user_agent) ?? null;
+  const eff_landing_page = nz(landing_page) ?? nz(leadAttr?.landing_page) ?? null;
 
   const hasClickId = Boolean(eff_gclid || eff_gbraid || eff_wbraid);
   // ECL-eligible: we have either matched a lead (so the uploader will pull
@@ -537,7 +688,11 @@ Deno.serve(async (req: Request) => {
     match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
   );
   let status: string;
-  if ((hasClickId || hasEclData) && conversion_value > 0) {
+  if (eventKind === "transfer") {
+    // A declared transfer uses the transfer webhook's status namespace, so the
+    // uploader routes it to CallXfer rather than judging it on $0 value.
+    status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
+  } else if ((hasClickId || hasEclData) && conversion_value > 0) {
     // 'monetize_ready' = a monetized (CCO) event ready to upload; parallels the
     // transfer path's 'transfer_ready'. (Renamed from 'ready_to_upload' 2026-08-07.)
     status = "monetize_ready";
@@ -584,6 +739,16 @@ Deno.serve(async (req: Request) => {
         caller_last_name,
         caller_zip,
         caller_state,
+        caller_address: eff_caller_address,
+        caller_city: eff_caller_city,
+        ip_address: eff_ip_address,
+        user_agent: eff_user_agent,
+        landing_page: eff_landing_page,
+        campaign_id,
+        adgroup_id,
+        creative_id,
+        target_id,
+        network,
         publisher,
         utm_source: eff_utm_source,
         utm_medium: eff_utm_medium,
@@ -598,10 +763,10 @@ Deno.serve(async (req: Request) => {
         queue,
         call_type,
         call_status,
+        program,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
-        google_ads_conversion_action_id:
-          Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE") || null,
-        google_ads_conversion_action_name: "CallConvertOffline",
+        google_ads_conversion_action_id: Deno.env.get(spec.action_id_env) || null,
+        google_ads_conversion_action_name: spec.conversion_name,
         raw_payload: rawPayload,
         dedupe_key,
       })
@@ -635,7 +800,10 @@ Deno.serve(async (req: Request) => {
   // Cross-cutting log to api_logs so Ringba inbound calls show up in the
   // same audit trail as CallTools outbound calls.
   await supabase.from("api_logs").insert({
-    api_type: is_caliber ? "cv-internet-caliber" : "cv-cco-ringba",
+    // Was `is_caliber ? "cv-internet-caliber" : "cv-cco-ringba"`, which filed
+    // every Caliber row as internet — so Energy would have been invisible the
+    // moment it moved across. Now carries the real source and program.
+    api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
     caller_id: caller_id || "",
@@ -645,7 +813,9 @@ Deno.serve(async (req: Request) => {
       parsed: {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_value, conversion_time: conversion_time.toISOString(),
-        currency_code, transaction_id, caller_id,
+        currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
+        cv_source: source, program, per_call_dedupe: !collapsePhoneDay,
+        endpoint: "ringba-conversion-webhook", resolved_event: eventKind,
       },
     } as object,
     response_payload: {
@@ -666,6 +836,9 @@ Deno.serve(async (req: Request) => {
       event_id: eventId,
       inserted,
       status,
+      event_type: EVENT_TYPE,
+      cv_source: source,
+      program,
       matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },

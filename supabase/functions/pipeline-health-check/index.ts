@@ -75,6 +75,8 @@ const MAX_ATTEMPTS = 6;          // matches the uploader's retry cap
 const FAILURE_WINDOW_H = 3;      // look back this far for delivery failures
 const FAILURE_MIN = 10;          // floor: ignore a trickle of naturally-unmatchable rows
 const FAILURE_RATE = 0.20;       // ...and only alert when this share of attempts failed
+const PUBLISHER_DROP_WINDOW_H = 3;   // look back this far for publisher-gate drops
+const PUBLISHER_DROP_MIN = 5;        // ignore a trickle of genuine other-publisher traffic
 const ALERT_TO = "larazielin1@gmail.com";
 
 // Report a secret as set/unset with a last-4 fingerprint — enough to tell two
@@ -210,6 +212,41 @@ async function failureStats(
   };
 }
 
+// 4. PUBLISHER-DROPPED — the cutover failure mode nothing else can see.
+//
+// Both webhooks hard-drop any event whose `publisher` is not exactly 'NBA':
+// api_logs row, HTTP 200, no retry, no email. That is correct for other
+// publishers' traffic, but during the Ringba->Caliber migration it is also
+// exactly what a Caliber pixel looks like when its publisher token resolves to
+// something else (or does not resolve at all). Every Energy event would vanish
+// on day one with no backlog, no failure and no symptom anywhere — the stall
+// and rejection checks structurally cannot see it, because the rows never
+// existed to begin with.
+//
+// Returns null if the probe itself fails, matching the other probes' contract.
+async function publisherDrops(
+  supabase: ReturnType<typeof createClient>,
+  sinceIso: string,
+): Promise<{ count: number; values: string[] } | null> {
+  const { data, error } = await supabase
+    .from("api_logs")
+    .select("response_payload")
+    .gte("created_at", sinceIso)
+    .eq("response_payload->>reason", "non-nba-publisher")
+    .limit(500);
+  if (error) {
+    console.error("publisher-drop probe failed:", error.message);
+    return null;
+  }
+  const rows = (data ?? []) as Array<{ response_payload: Record<string, unknown> | null }>;
+  const values = new Set<string>();
+  for (const r of rows) {
+    const p = r.response_payload?.publisher;
+    values.add(p === null || p === undefined || p === "" ? "(empty)" : String(p));
+  }
+  return { count: rows.length, values: [...values].slice(0, 10) };
+}
+
 async function lastUploadSuccess(
   supabase: ReturnType<typeof createClient>,
 ): Promise<string | null> {
@@ -245,10 +282,12 @@ Deno.serve(async (req: Request) => {
   let report: Record<string, unknown>;
   try {
     const config = auditConfig();
-    const [backlog, lastUpload, failures] = await Promise.all([
+    const dropWindowIso = new Date(now - PUBLISHER_DROP_WINDOW_H * 3600000).toISOString();
+    const [backlog, lastUpload, failures, drops] = await Promise.all([
       apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
       failureStats(supabase),
+      publisherDrops(supabase, dropWindowIso),
     ]);
 
     // `config` stays a pure audit of the environment. Runtime faults (probe failures,
@@ -290,9 +329,37 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Publisher-gate drops. Note this alerts on ANY sustained drop, including
+    // legitimate other-publisher traffic — during a migration a quiet gate is
+    // worth more than a quiet inbox, and the email names the values received so
+    // it takes seconds to tell "Caliber is misconfigured" from "not our call".
+    if (drops === null) {
+      problems.push(
+        "Publisher-drop probe failed — cannot tell whether events are being dropped at the " +
+        "publisher gate. During the Caliber cutover this is the failure mode with no other symptom.",
+      );
+    } else if (drops.count >= PUBLISHER_DROP_MIN) {
+      problems.push(
+        `${drops.count} event(s) DROPPED at the publisher gate in the last ${PUBLISHER_DROP_WINDOW_H}h ` +
+        `(publisher must be exactly 'NBA'; received: ${drops.values.join(", ")}). ` +
+        "These never became rows: no backlog, no failure, nothing to retry. If a value here looks " +
+        "like a Caliber publisher name or is (empty), a migrated pixel is misconfigured and every " +
+        "event from it is being lost silently — map the value or fix the token at source.",
+      );
+    }
+    const publisherDropping = drops !== null && drops.count >= PUBLISHER_DROP_MIN;
+
     report = {
       checked_at: new Date(now).toISOString(),
       problems,
+      publisher_gate: drops === null
+        ? { probe: "failed" }
+        : {
+            window_hours: PUBLISHER_DROP_WINDOW_H,
+            dropped: drops.count,
+            values_received: drops.values,
+            dropping: publisherDropping,
+          },
       api: { backlog, last_success: lastUpload, stalled },
       delivery: failures === null ? { probe: "failed" } : {
         window_hours: FAILURE_WINDOW_H,
@@ -315,7 +382,8 @@ Deno.serve(async (req: Request) => {
       },
     };
 
-    const alert = stalled || rejecting || backlogUnknown || failures === null || !config.ok;
+    const alert = stalled || rejecting || backlogUnknown || failures === null ||
+      publisherDropping || drops === null || !config.ok;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
@@ -323,6 +391,7 @@ Deno.serve(async (req: Request) => {
         if (stalled) parts.push("delivery STALLED");
         if (rejecting) parts.push("Google REJECTING uploads");
         if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
+        if (publisherDropping) parts.push("PUBLISHER-GATE DROPS");
         if (!config.ok) parts.push("MISCONFIGURED");
         const subject = force && !alert
           ? "NBA offline-conversion health check — TEST (healthy)"
