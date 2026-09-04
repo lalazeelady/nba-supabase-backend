@@ -67,16 +67,44 @@ newly eligible, 624 still correctly excluded as identified non-Google.
 > but would have newly *excluded* rows carrying a non-Google `utm_source`
 > alongside a Google `ib_source`. The supersetting form cannot regress.
 
-**Going-forward only.** The view is evaluated live and the uploader selects on
-status + age + attempts, so relaxing the rule unconditionally would have swept
-~3,400 already-skipped historical rows per week into Google in one batch and
-spiked Smart Bidding. Rows created before `offline_cv_denylist_cutover()` keep
-the old allow-list; only newer rows use the new rule. To re-date the cutover:
+### 3b. The bug this uncovered, and the backlog it drains
+
+The old catch-all required `utm_source` **and** `ib_source` to *both* be blank.
+Internet calls always carry `ib_source='nba-internet-calls'`, so only one was
+ever blank — they never qualified. The rule was treating a **phone route name**
+as evidence the traffic was not Google. Measured over 14 days:
+
+| ib_source | utm_source | rows | uploaded |
+|---|---|---:|---:|
+| `nba` | `google` | 5,448 | 5,444 |
+| `nba-internet-calls` | `google` | 62 | 62 |
+| `nba-internet-calls` | *(blank)* | 2,944 | **0 — never, not once** |
+| `nba` | *(blank)* | 68 | **0** |
+
+The catch-all only ever helped **Ringba**, which sends neither field. It looked
+universal; it never was.
+
+Worse, these rows sit at status `monetize_ready` / `transfer_ready`. They look
+ready in the table and the view filters them out before the uploader sees them —
+**an invisible backlog that reports as healthy.** 4,054 still-recoverable rows,
+2,091 of them revenue events worth **$14,842 Google never received**, plus 114
+already aged past the 90-day window and permanently lost.
+
+**The rule therefore applies to all rows, history included** (owner's decision,
+4 Sep 2026), which lets the existing cron drain that backlog with no extra
+tooling: the uploader runs every 15 min at `limit=250` (~1,000/hr), so it clears
+in about four hours. All 4,054 have `upload_attempts = 0`, and the uploader's own
+85-day cutoff skips the aged-out rows, so there is no bulk rejection and no
+false REJECTING alert.
+
+**Rollback lever.** `offline_cv_denylist_cutover()` is set to `2000-01-01` so the
+rule covers everything. Setting it to a *future* date reverts every row to the
+old allow-list instantly — one statement, no view rebuild, no redeploy:
 
 ```sql
 create or replace function public.offline_cv_denylist_cutover()
 returns timestamptz language sql immutable
-as $$ select timestamptz '2026-09-12 00:00:00+00' $$;
+as $$ select timestamptz '2099-01-01 00:00:00+00' $$;
 ```
 
 ### 4. Unresolved-token sanitizer
@@ -128,7 +156,9 @@ a no-op for it.
 Nothing here is destructive. In order of blast radius:
 
 - **Upload rule only:** move `offline_cv_denylist_cutover()` to a far-future
-  date. Every row reverts to the old allow-list instantly, no redeploy.
+  date (see §3b). Every row reverts to the old allow-list instantly, no
+  redeploy. Rows already uploaded stay uploaded — Google de-dupes on
+  `transactionId`, so re-enabling later does not double-count them.
 - **Functions:** redeploy the previous version. The `program` column simply
   stops being written; nothing reads it as required.
 - **Migration:** `program` is nullable and additive. There is no reason to drop
@@ -245,5 +275,8 @@ The sanitizer strips these before they reach a column, so hits here mean the
   `upload-google-offline-conversions` sends only click id + hashed
   email/phone/name+zip. The export view even hardcodes `user_agent` to `NULL`.
   They are reporting-only today. Not a defect — just don't expect them in Google.
-- **Internet's "unknown source" rows.** Owner's call (Sep 2026): leave alone,
-  it stops mattering once everything is on Caliber.
+- **Watch the first drain.** For ~4h after the migration lands, expect the
+  uploader to be clearing ~1,000/hr of previously-stuck rows. Backlog will spike
+  and fall. `pipeline-health-check` should not alert (a stall needs backlog high
+  AND no successful upload in an hour — uploads will be flowing), but it is the
+  one window where a genuine fault would be easy to mistake for the drain.
