@@ -722,6 +722,7 @@ Deno.serve(async (req: Request) => {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_value, conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id,
+        cv_source: source, per_call_dedupe: !collapsePhoneDay,
       },
     } as object,
     response_payload: {

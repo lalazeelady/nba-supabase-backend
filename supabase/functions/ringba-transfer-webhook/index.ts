@@ -453,7 +453,11 @@ Deno.serve(async (req: Request) => {
       error_message: null,
     });
     return new Response(
-      JSON.stringify({ ok: true, stored: false, skipped: "non-nba-publisher" }),
+      JSON.stringify({
+        ok: true, stored: false, skipped: "non-nba-publisher",
+        publisher_received: publisher || null,
+        hint: "publisher must be exactly 'NBA'; tell the NBA team the value you send and they will map it",
+      }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
@@ -609,6 +613,7 @@ Deno.serve(async (req: Request) => {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
+        cv_source: source, per_call_dedupe: perCall,
       },
     } as object,
     response_payload: {
@@ -623,7 +628,7 @@ Deno.serve(async (req: Request) => {
   return new Response(
     JSON.stringify({
       ok: true, event_id: eventId, inserted, status,
-      event_type: EVENT_TYPE, matched_by: match.matched_by,
+      event_type: EVENT_TYPE, cv_source: source, matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
