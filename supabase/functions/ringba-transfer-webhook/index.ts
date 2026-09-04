@@ -18,6 +18,17 @@
 //   - conversion_name  = 'CallXfer'
 //   - status           = 'transfer_ready' | 'transfer_unmatched'
 //
+// ...but those are now the DEFAULTS, not the only behaviour. An explicit
+// `event=conversion` param makes this endpoint handle a revenue event exactly
+// as ringba-conversion-webhook would. The endpoint is no longer the only thing
+// carrying that meaning, because when it was, a pixel pointed at the wrong URL
+// lost every event silently: the conversion became a call_transferred row with
+// a dedupe_key identical to the real transfer's, so the upsert no-opped and the
+// revenue disappeared behind an {ok:true}. See resolveEvent() / EVENT_SPEC.
+//
+// Also carried per event: `program` (energy / aca / internet / ...), without
+// which every Caliber event lands under one undifferentiated source.
+//
 // De-dup: GROSS — ONE CallXfer per Ringba CALL. dedupe_key is
 // 'ringba:call_transferred:<conversion_call_id>', so uploads to Google equal Ringba's gross
 // transfer count; only re-fires of the SAME call collapse. Phone+ET-day is a fallback used
@@ -41,8 +52,54 @@ const corsHeaders = {
 // non-Ringba platform (Caliber, during the Ringba->Caliber migration) can post
 // here and be labelled correctly instead of masquerading as Ringba.
 const DEFAULT_SOURCE = "ringba";
-const EVENT_TYPE = "call_transferred";
-const CONVERSION_NAME = "CallXfer";
+
+// This endpoint's NATIVE event. An explicit `event=` param overrides it — see
+// resolveEvent() below and the note in the handler.
+const NATIVE_EVENT = "transfer";
+
+// Everything that differs between the two event types lives here, so a request
+// that declares `event=conversion` on this endpoint is handled identically to
+// one that arrived at ringba-conversion-webhook.
+const EVENT_SPEC = {
+  transfer: {
+    event_type: "call_transferred",
+    conversion_name: "CallXfer",
+    action_id_env: "GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_TRANSFERRED",
+    log_tag: "xfr",
+  },
+  conversion: {
+    event_type: "call_converted_revenue",
+    conversion_name: "CallConvertOffline",
+    action_id_env: "GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_CONVERTED_REVENUE",
+    log_tag: "cco",
+  },
+} as const;
+
+type EventKind = keyof typeof EVENT_SPEC;
+
+// A pixel pointed at the wrong endpoint used to be a total, silent loss: a
+// conversion posted here became a call_transferred row whose dedupe_key was
+// identical to the real transfer's, so the upsert no-opped and the revenue
+// vanished with an {ok:true}. Honour an explicit `event=` over the endpoint so
+// the URL is no longer the only thing carrying that meaning.
+function resolveEvent(raw: string | null): EventKind {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "conversion" || v === "call_converted_revenue" || v === "monetize" || v === "revenue") {
+    return "conversion";
+  }
+  if (v === "transfer" || v === "call_transferred" || v === "xfer") return "transfer";
+  return NATIVE_EVENT;
+}
+
+// Programs we recognise. An unrecognised value is still stored verbatim — a
+// typo must never cost the event — but only these are treated as canonical.
+const KNOWN_PROGRAMS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
+
+function normalizeProgram(raw: string | null): string | null {
+  const v = (raw || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!v) return null;
+  return KNOWN_PROGRAMS.includes(v) ? v : v.slice(0, 40);
+}
 
 // Field-name variants we accept from Ringba. First non-empty value wins.
 // `conversion_call_id` = the id of the transferred call (Ringba 'RGB…').
@@ -124,12 +181,38 @@ const FIELD_VARIANTS = {
   // canonical name; the others are accepted so nothing breaks if an older
   // integration sends them. Whitelisted below.
   source: ["cv_source", "source", "src", "platform"],
+  // Which of the two events this is, independent of which URL it arrived at.
+  event: ["event", "event_type", "eventType", "cv_event"],
+  // Ignored for a transfer; read only when a request declares event=conversion.
+  conversion_value: [
+    "conversion_value", "conversionValue", "revenue", "payout",
+    "value", "amount", "buyer_payout", "buyerPayout",
+  ],
+  // Which campaign the call belongs to (energy / aca / internet / ...). Without
+  // it every Caliber event lands under one undifferentiated source and Energy
+  // becomes indistinguishable from Internet in reporting.
+  program: ["program", "campaign_program", "vertical", "product"],
+  // Caliber call status. Carried here so the "no connect" drop applies on both
+  // endpoints, not just the revenue one.
+  call_status: ["status", "Status", "call_status", "callStatus"],
 } as const;
+
+// An unresolved template token — "[tag:User:gclid]", "{{contact.email}}" — is
+// worse than a missing value: it looks like data. A literal gclid of
+// "[tag:User:gclid]" would be stored, matched against and uploaded as if real.
+// Treat any wholly-templated value as absent.
+function isUnresolvedToken(v: string): boolean {
+  const t = v.trim();
+  return /^\[[^\]]*\]$/.test(t) || /^\{\{.*\}\}$/.test(t) || /^%[A-Za-z_]+%$/.test(t);
+}
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const k of keys) {
     const v = obj[k];
-    if (v !== undefined && v !== null && String(v).length > 0) return String(v);
+    if (v === undefined || v === null) continue;
+    const s = String(v);
+    if (s.length === 0 || isUnresolvedToken(s)) continue;
+    return s;
   }
   return null;
 }
@@ -175,6 +258,15 @@ function parseTimestamp(s: string | null): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// Only used when a request declares event=conversion on this endpoint.
+function parseNumber(s: string | null): number | null {
+  if (s === null) return null;
+  const cleaned = s.replace(/[^0-9.\-]/g, "");
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
 // Last 10 digits of a phone, or null if fewer than 10 digits are present.
 function phoneLast10(raw: string | null): string | null {
   if (!raw) return null;
@@ -207,6 +299,7 @@ function etDate(d: Date): string {
 // have a real transfer postback and some won't.
 function buildDedupeKey(args: {
   source: string;
+  event_type: string;
   perCall: boolean;
   conversion_call_id: string | null;
   caller_id: string | null;
@@ -215,6 +308,7 @@ function buildDedupeKey(args: {
   wbraid: string | null;
   conversion_time: Date;
 }): string {
+  const EVENT_TYPE = args.event_type;
   const p10 = phoneLast10(args.caller_id);
   if (args.perCall) {
     // One row per CALL. A re-fire of the same call collapses; two genuine
@@ -420,6 +514,13 @@ Deno.serve(async (req: Request) => {
   const agent_name = pick(merged, FIELD_VARIANTS.agent_name);
   const queue = pick(merged, FIELD_VARIANTS.queue);
   const call_type = pick(merged, FIELD_VARIANTS.call_type);
+  const call_status = pick(merged, FIELD_VARIANTS.call_status);
+  const program = normalizeProgram(pick(merged, FIELD_VARIANTS.program));
+
+  // Which event this actually is, endpoint notwithstanding.
+  const eventKind = resolveEvent(pick(merged, FIELD_VARIANTS.event));
+  const spec = EVENT_SPEC[eventKind];
+  const EVENT_TYPE = spec.event_type;
 
   // Explicit source, whitelisted. Anything unrecognised falls back to the
   // default rather than writing an arbitrary string into the column.
@@ -434,8 +535,11 @@ Deno.serve(async (req: Request) => {
   const perCall = declaredSource || source === "ringba";
 
   // Transfers are a count signal: value is ALWAYS $0, regardless of any
-  // conversion_value the pixel might carry.
-  const conversion_value = 0;
+  // conversion_value the pixel might carry. A request that declares
+  // event=conversion is a revenue event and keeps its value.
+  const conversion_value = eventKind === "transfer"
+    ? 0
+    : (parseNumber(pick(merged, FIELD_VARIANTS.conversion_value)) ?? 0);
 
   // Ingress filter: only NBA-publisher transfers become rows (parity with the
   // revenue webhook). Log-and-drop others; return 200 so Ringba won't retry.
@@ -447,6 +551,7 @@ Deno.serve(async (req: Request) => {
       request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
       response_payload: {
         skipped: true, reason: "non-nba-publisher", publisher: publisher || null,
+        cv_source: source, program, event: eventKind,
       } as object,
       http_status: 200,
       success: true,
@@ -462,8 +567,29 @@ Deno.serve(async (req: Request) => {
     );
   }
 
+  // "No connect" fires are not real transfers or monetizations. The revenue
+  // webhook has always dropped these; applying it here too means the rule holds
+  // whichever endpoint a pixel is pointed at.
+  if (call_status && /no[\s_-]*connect/i.test(call_status)) {
+    await supabase.from("api_logs").insert({
+      api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
+      lead_id: null,
+      transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
+      caller_id: caller_id || "",
+      request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
+      response_payload: { skipped: true, reason: "no-connect", call_status } as object,
+      http_status: 200,
+      success: true,
+      error_message: null,
+    });
+    return new Response(
+      JSON.stringify({ ok: true, stored: false, skipped: "no-connect" }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   const dedupe_key = buildDedupeKey({
-    source, perCall,
+    source, event_type: EVENT_TYPE, perCall,
     conversion_call_id, caller_id, gclid, gbraid, wbraid, conversion_time,
   });
 
@@ -508,7 +634,18 @@ Deno.serve(async (req: Request) => {
   const hasEclData = Boolean(
     match.lead_id || caller_email || caller_id || (caller_first_name && caller_last_name && caller_zip),
   );
-  const status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
+  // Transfer statuses are their own namespace; a declared conversion uses the
+  // revenue webhook's ladder so both endpoints agree on what "ready" means.
+  let status: string;
+  if (eventKind === "transfer") {
+    status = (hasClickId || hasEclData) ? "transfer_ready" : "transfer_unmatched";
+  } else if ((hasClickId || hasEclData) && conversion_value > 0) {
+    status = "monetize_ready";
+  } else if (match.lead_id) {
+    status = "matched";
+  } else {
+    status = "unmatched";
+  }
 
   // Upsert by dedupe_key: a re-fired transfer postback is a no-op.
   const { data: existing } = await supabase
@@ -564,15 +701,16 @@ Deno.serve(async (req: Request) => {
         agent_name,
         queue,
         call_type,
+        call_status,
+        program,
         utm_source: eff_utm_source,
         utm_medium: eff_utm_medium,
         utm_campaign: eff_utm_campaign,
         utm_content: eff_utm_content,
         utm_term: eff_utm_term,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
-        google_ads_conversion_action_id:
-          Deno.env.get("GOOGLE_ADS_CONVERSION_ACTION_ID_CALL_TRANSFERRED") || null,
-        google_ads_conversion_action_name: CONVERSION_NAME,
+        google_ads_conversion_action_id: Deno.env.get(spec.action_id_env) || null,
+        google_ads_conversion_action_name: spec.conversion_name,
         raw_payload: rawPayload,
         dedupe_key,
       })
@@ -602,7 +740,7 @@ Deno.serve(async (req: Request) => {
   }
 
   await supabase.from("api_logs").insert({
-    api_type: "cv-xfr-ringba",
+    api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
     caller_id: caller_id || "",
@@ -613,7 +751,8 @@ Deno.serve(async (req: Request) => {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
-        cv_source: source, per_call_dedupe: perCall,
+        cv_source: source, program, per_call_dedupe: perCall,
+        endpoint: "ringba-transfer-webhook", resolved_event: eventKind,
       },
     } as object,
     response_payload: {
@@ -628,7 +767,8 @@ Deno.serve(async (req: Request) => {
   return new Response(
     JSON.stringify({
       ok: true, event_id: eventId, inserted, status,
-      event_type: EVENT_TYPE, cv_source: source, matched_by: match.matched_by,
+      event_type: EVENT_TYPE, cv_source: source, program,
+      matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
