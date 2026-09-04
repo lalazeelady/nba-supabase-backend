@@ -274,17 +274,17 @@ reads it in Ringba reporting, insert a `%20`.
 
 ## 9. Ringba pixels — updates for the Caliber cutover — MED
 
-Ringba stays live for every program that has not migrated yet, so its two pixels
+Ringba stays live for every offer that has not migrated yet, so its two pixels
 should carry the same new parameters Caliber does. None of this is urgent — the
 backend accepts both the old and new forms — but without it, Ringba rows have a
-null `program` and are indistinguishable from each other in the new reporting.
+null `offer` and are indistinguishable from each other in the new reporting.
 
 Four edits to **both** `RingbaToSupaGglOfflineCV-Monet` and `-Xfer`:
 
 1. **`pub=` → `publisher=`.** Both are accepted by the backend (`pub` is in the
    variant list) so this is cosmetic consistency with the Caliber spec, not a
    fix. Do it while you are in there.
-2. **Add `&program=<program>`** — `aca`, `energy`, etc., matching the campaign
+2. **Add `&offer=<offer>`** — `aca`, `energy`, etc., matching the campaign
    the pixel is attached to. This is the one that actually buys something.
 3. **Add `&event=conversion`** to `-Monet` and **`&event=transfer`** to `-Xfer`.
    Belt-and-braces: it makes the pixel say what it is rather than relying on
@@ -310,13 +310,13 @@ Four edits to **both** `RingbaToSupaGglOfflineCV-Monet` and `-Xfer`:
 Corrected `-Monet` (Fire on Convert), space removed and new params added:
 
 ```
-https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-conversion-webhook?secret=<secret>&cv_source=ringba&event=conversion&program=<program>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_value=[Call:ConversionAmount]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&trusted_form=[tag:User:trusted_form]
+https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-conversion-webhook?secret=<secret>&cv_source=ringba&event=conversion&offer=<offer>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_value=[Call:ConversionAmount]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&trusted_form=[tag:User:trusted_form]
 ```
 
 Corrected `-Xfer` (Fire on Connect):
 
 ```
-https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-transfer-webhook?secret=<secret>&cv_source=ringba&event=transfer&program=<program>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&landing_page=[tag:User:landing_page]&campaignid=[tag:User:campaignid]&adgroupid=[tag:User:adgroupid]&network=[tag:User:network]&creative=[tag:User:creative]&target=[tag:User:targetid]&useragent=[tag:User:useragent]&state=[tag:User:state]&msclkid=[tag:User:msclkid]&oppref=[tag:User:oppref]&address=[tag:User:address]
+https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/ringba-transfer-webhook?secret=<secret>&cv_source=ringba&event=transfer&offer=<offer>&ringba_call_id=[Call:InboundCallId]&caller_id=[tag:InboundNumber:NumberE164]&conversion_time=[Call:CallDateTime]&gclid=[tag:User:gclid]&transaction_id=[tag:User:transaction_id]&publisher=[tag:Publisher:Name]&gbraid=[tag:User:gbraid]&wbraid=[tag:User:wbraid]&first_name=[tag:User:firstname]&last_name=[tag:User:lastname]&ip_address=[tag:User:ip_address]&email=[tag:User:email]&ib_source=[tag:User:ib_source]&city=[tag:User:city]&agent_name=[tag:User:agent_name]&queue=[tag:User:queueid]&landing_page=[tag:User:landing_page]&campaignid=[tag:User:campaignid]&adgroupid=[tag:User:adgroupid]&network=[tag:User:network]&creative=[tag:User:creative]&target=[tag:User:targetid]&useragent=[tag:User:useragent]&state=[tag:User:state]&msclkid=[tag:User:msclkid]&oppref=[tag:User:oppref]&address=[tag:User:address]
 ```
 
 > `cv_source=ringba` is added explicitly. Ringba is already the default when no

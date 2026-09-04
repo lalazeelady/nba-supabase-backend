@@ -1,8 +1,8 @@
 # Caliber cutover — runbook
 
-Energy moves from Ringba to Caliber first; the other programs follow one at a
+Energy moves from Ringba to Caliber first; the other offers follow one at a
 time. Ringba and Caliber postbacks fire **simultaneously** for different
-programs throughout, and Internet has been on Caliber all along via a separate,
+offers throughout, and Internet has been on Caliber all along via a separate,
 older pixel that must keep behaving exactly as it does today.
 
 Spec handed to the Caliber POC: the **Caliber Postback Spec** artifact (rev 2).
@@ -25,15 +25,15 @@ upsert found the transfer row already there, no-opped, and returned
 
 With `event=`, a mis-pointed URL is now recoverable rather than fatal.
 
-### 2. `program=` — Caliber is no longer one undifferentiated bucket
+### 2. `offer=` — Caliber is no longer one undifferentiated bucket
 
-New column `offline_conversion_events.program`. Before this, everything Caliber
+New column `offline_conversion_events.offer`. Before this, everything Caliber
 sent was `source='caliber'`, and the conversion webhook literally labelled every
 Caliber row `api_type='cv-internet-caliber'`. The moment Energy migrated it would
 have been filed as Internet in every log and report, with nothing to separate
-them. `api_type` is now `cv-<xfr|cco>-<source>[-<program>]`.
+them. `api_type` is now `cv-<xfr|cco>-<source>[-<offer>]`.
 
-An unrecognised program value is stored verbatim rather than rejected — a typo
+An unrecognised offer value is stored verbatim rather than rejected — a typo
 in a pixel must never cost an event.
 
 ### 3. Upload gate: allow-list → deny-list
@@ -47,7 +47,7 @@ and `ib_source` were blank.
 Ringba sends **no `ib_source` at all**. Caliber **always** sends one. So rows
 that qualified only through that both-blank catch-all — 1,569 in a
 representative 7-day window, ~28% of Ringba's volume — would have moved to
-"`ib_source` set but unrecognised → skip" the moment their program migrated, and
+"`ib_source` set but unrecognised → skip" the moment their offer migrated, and
 stopped reaching Google Ads with no error anywhere. The loss would have been
 caused purely by the new platform sending *more* data than the old one.
 
@@ -133,13 +133,13 @@ a no-op for it.
 ## Cutover procedure
 
 1. **Deploy** the migration, then the three functions. Order matters: the
-   webhooks write `program`, so the column must exist first.
+   webhooks write `offer`, so the column must exist first.
 2. **Confirm the POC has rev 2 of the spec.** The share pin must be moved or
    they will still be reading rev 1, which has neither new parameter.
 3. **One test transfer + one test conversion** from Caliber on Energy, before
    any live traffic. Check the response body:
    - `cv_source: "caliber"` — not `"ringba"`, or `cv_source` did not arrive
-   - `program: "energy"` — not `null`
+   - `offer: "energy"` — not `null`
    - `event_type` — matches the postback fired
    - `matched_by: "transaction_id"` — ideally; `caller_id` means it fell back
      to phone; `null` means no lead matched
@@ -159,9 +159,9 @@ Nothing here is destructive. In order of blast radius:
   date (see §3b). Every row reverts to the old allow-list instantly, no
   redeploy. Rows already uploaded stay uploaded — Google de-dupes on
   `transactionId`, so re-enabling later does not double-count them.
-- **Functions:** redeploy the previous version. The `program` column simply
+- **Functions:** redeploy the previous version. The `offer` column simply
   stops being written; nothing reads it as required.
-- **Migration:** `program` is nullable and additive. There is no reason to drop
+- **Migration:** `offer` is nullable and additive. There is no reason to drop
   it, and dropping it would break the view.
 
 ---
@@ -171,7 +171,7 @@ Nothing here is destructive. In order of blast radius:
 **1. Did the test call land, and in which columns?**
 
 ```sql
-select id, source, program, event_type, status, publisher, conversion_value,
+select id, source, offer, event_type, status, publisher, conversion_value,
        conversion_call_id, caller_id, transaction_id, lead_id,
        order_id, dedupe_key, ib_source, utm_source, conversion_time
 from offline_conversion_events
@@ -189,7 +189,7 @@ Google conversion actions.
 ```sql
 select response_payload->>'publisher' as publisher_received,
        response_payload->>'cv_source' as cv_source,
-       response_payload->>'program'   as program,
+       response_payload->>'offer'   as offer,
        count(*)
 from api_logs
 where created_at > now() - interval '24 hours'
@@ -203,7 +203,7 @@ every event**. Empty result is the healthy state.
 **3. Would this event actually upload to Google?**
 
 ```sql
-select e.id, e.source, e.program, e.event_type, e.status,
+select e.id, e.source, e.offer, e.event_type, e.status,
        (x.event_id is not null) as passes_upload_gate
 from offline_conversion_events e
 left join v_offline_conversion_export x on x.event_id = e.id
@@ -218,14 +218,14 @@ excluded it — check `utm_source` / `ib_source` against
 
 ```sql
 select date_trunc('day', conversion_time at time zone 'America/New_York')::date as et_day,
-       source, program, event_type,
+       source, offer, event_type,
        count(*) as events,
        count(*) filter (where status = 'uploaded') as uploaded,
        round(sum(conversion_value), 2) as value
 from offline_conversion_events
 where publisher = 'NBA'
   and conversion_time > now() - interval '14 days'
-  and (program = 'energy' or program is null)
+  and (offer = 'energy' or offer is null)
 group by 1,2,3,4
 order by 1 desc, 2, 4;
 ```
@@ -236,7 +236,7 @@ flat. A drop in the total is the thing to catch.
 **5. Are the two grains behaving?**
 
 ```sql
-select source, program, event_type,
+select source, offer, event_type,
        count(*) as rows,
        count(distinct dedupe_key) as distinct_keys,
        count(distinct order_id)   as distinct_orders
@@ -251,7 +251,7 @@ into one — the failure the `event=` parameter exists to prevent.
 **6. Did any unresolved token get through?**
 
 ```sql
-select id, source, program, gclid, gbraid, wbraid, utm_source, ib_source
+select id, source, offer, gclid, gbraid, wbraid, utm_source, ib_source
 from offline_conversion_events
 where created_at > now() - interval '7 days'
   and (raw_payload::text like '%[tag:%' or raw_payload::text like '%{{%');

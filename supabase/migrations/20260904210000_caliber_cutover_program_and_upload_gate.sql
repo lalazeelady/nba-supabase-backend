@@ -1,11 +1,11 @@
--- Caliber cutover: per-program attribution + the upload eligibility rule
+-- Caliber cutover: per-offer attribution + the upload eligibility rule
 --
 -- Two independent changes, both driven by Energy moving from Ringba to Caliber.
 --
--- 1. offline_conversion_events.program
+-- 1. offline_conversion_events.offer
 --    Until now every Caliber event landed under source='caliber' with nothing
 --    distinguishing Internet from Energy (and, later, ACA). The webhooks now
---    carry an explicit `program` param; this stores it.
+--    carry an explicit `offer` param; this stores it.
 --
 -- 2. v_offline_conversion_export — allow-list becomes deny-list
 --    The old rule uploaded a row only when it could POSITIVELY identify the
@@ -66,19 +66,19 @@
 -- No explicit BEGIN/COMMIT: matches the other migrations in this directory and
 -- lets the migration runner own the transaction.
 
--- 1. program ------------------------------------------------------------------
+-- 1. offer ------------------------------------------------------------------
 
 alter table public.offline_conversion_events
-  add column if not exists program text;
+  add column if not exists offer text;
 
-comment on column public.offline_conversion_events.program is
+comment on column public.offline_conversion_events.offer is
   'Campaign the call belongs to (energy / aca / internet / medicare / ...), from '
-  'the webhook `program` param. Null for events predating the Caliber cutover and '
+  'the webhook `offer` param. Null for events predating the Caliber cutover and '
   'for any sender that does not send it.';
 
--- Reporting splits by program within a source, over a time range.
-create index if not exists idx_oce_program_event_time
-  on public.offline_conversion_events (program, event_type, conversion_time desc);
+-- Reporting splits by offer within a source, over a time range.
+create index if not exists idx_oce_offer_event_time
+  on public.offline_conversion_events (offer, event_type, conversion_time desc);
 
 -- 2. helpers ------------------------------------------------------------------
 
@@ -147,7 +147,7 @@ comment on function public.is_google_source(text) is
   'Google/YouTube traffic, or one of the NBA funnel inbound routes.';
 
 -- 3. the export view ----------------------------------------------------------
--- NOTE: `program` is appended LAST. CREATE OR REPLACE VIEW can only add columns
+-- NOTE: `offer` is appended LAST. CREATE OR REPLACE VIEW can only add columns
 -- at the end — inserting one mid-list fails against the existing view.
 
 create or replace view public.v_offline_conversion_export as
@@ -194,7 +194,7 @@ select
   coalesce(nullif(b.caller_zip, ''), nullif(l.zip, '')) as zip,
   b.source,
   b.ib_source_eff as ib_source_effective,
-  b.program
+  b.offer
 from base b
 left join public.leads l on l.id = b.lead_id
 where b.publisher = 'NBA'

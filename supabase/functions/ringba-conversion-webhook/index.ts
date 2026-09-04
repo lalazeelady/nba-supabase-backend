@@ -18,7 +18,7 @@
 //     URL a total silent loss: the event took on the other type, collided with
 //     that type's dedupe_key, and no-opped behind an {ok:true}. See
 //     resolveEvent() / EVENT_SPEC.
-//   - `program` (energy / aca / internet / ...) is carried per event. Before it,
+//   - `offer` (energy / aca / internet / ...) is carried per event. Before it,
 //     every Caliber row was filed as internet, so Energy would have gone
 //     invisible in reporting the moment it migrated.
 //
@@ -81,14 +81,14 @@ function resolveEvent(raw: string | null): EventKind {
   return NATIVE_EVENT;
 }
 
-// Programs we recognise. An unrecognised value is still stored verbatim — a
+// Offers we recognise. An unrecognised value is still stored verbatim — a
 // typo must never cost the event — but only these are treated as canonical.
-const KNOWN_PROGRAMS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
+const KNOWN_OFFERS = ["energy", "aca", "internet", "medicare", "final_expense", "auto"];
 
-function normalizeProgram(raw: string | null): string | null {
+function normalizeOffer(raw: string | null): string | null {
   const v = (raw || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (!v) return null;
-  return KNOWN_PROGRAMS.includes(v) ? v : v.slice(0, 40);
+  return KNOWN_OFFERS.includes(v) ? v : v.slice(0, 40);
 }
 
 // Field-name variants we accept. First non-empty value wins. `conversion_call_id` holds the
@@ -204,7 +204,7 @@ const FIELD_VARIANTS = {
   // Which of the two events this is, independent of which URL it arrived at.
   event: ["event", "event_type", "eventType", "cv_event"],
   // Which campaign the call belongs to (energy / aca / internet / ...).
-  program: ["program", "campaign_program", "vertical", "product"],
+  offer: ["offer", "program", "campaign_offer", "campaign_program", "vertical", "product"],
 } as const;
 
 // An unresolved template token — "[tag:User:gclid]", "{{contact.email}}" — is
@@ -505,7 +505,7 @@ Deno.serve(async (req: Request) => {
   const eventKind = resolveEvent(pick(merged, FIELD_VARIANTS.event));
   const spec = EVENT_SPEC[eventKind];
   const EVENT_TYPE = spec.event_type;
-  const program = normalizeProgram(pick(merged, FIELD_VARIANTS.program));
+  const offer = normalizeOffer(pick(merged, FIELD_VARIANTS.offer));
 
   const CALL_STATUS_KEYS = ["status", "Status", "call_status", "callStatus"];
   const claimedSource = (pick(merged, FIELD_VARIANTS.source) || "").trim().toLowerCase();
@@ -592,7 +592,7 @@ Deno.serve(async (req: Request) => {
         skipped: true,
         reason: "non-nba-publisher",
         publisher: publisher || null,
-        cv_source: source, program, event: eventKind,
+        cv_source: source, offer, event: eventKind,
       } as object,
       http_status: 200,
       success: true,
@@ -763,7 +763,7 @@ Deno.serve(async (req: Request) => {
         queue,
         call_type,
         call_status,
-        program,
+        offer,
         google_ads_customer_id: Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || null,
         google_ads_conversion_action_id: Deno.env.get(spec.action_id_env) || null,
         google_ads_conversion_action_name: spec.conversion_name,
@@ -802,8 +802,8 @@ Deno.serve(async (req: Request) => {
   await supabase.from("api_logs").insert({
     // Was `is_caliber ? "cv-internet-caliber" : "cv-cco-ringba"`, which filed
     // every Caliber row as internet — so Energy would have been invisible the
-    // moment it moved across. Now carries the real source and program.
-    api_type: `cv-${spec.log_tag}-${source}${program ? `-${program}` : ""}`,
+    // moment it moved across. Now carries the real source and offer.
+    api_type: `cv-${spec.log_tag}-${source}${offer ? `-${offer}` : ""}`,
     lead_id: match.lead_id,
     transaction_id: transaction_id || conversion_call_id || "ringba-unknown",
     caller_id: caller_id || "",
@@ -814,7 +814,7 @@ Deno.serve(async (req: Request) => {
         conversion_call_id, gclid, gbraid, wbraid,
         conversion_value, conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
-        cv_source: source, program, per_call_dedupe: !collapsePhoneDay,
+        cv_source: source, offer, per_call_dedupe: !collapsePhoneDay,
         endpoint: "ringba-conversion-webhook", resolved_event: eventKind,
       },
     } as object,
@@ -838,7 +838,7 @@ Deno.serve(async (req: Request) => {
       status,
       event_type: EVENT_TYPE,
       cv_source: source,
-      program,
+      offer,
       matched_by: match.matched_by,
     }),
     { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
