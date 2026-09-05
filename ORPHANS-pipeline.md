@@ -46,3 +46,54 @@ Tracked here so they don't get "fixed" twice.
   traffic only; these are EU/UK requirements. Keep the plumbing, expect nulls.
 - `click_timestamp` — a column and a Caliber field now exist, but no funnel
   captures it yet. Populating it is a site-repo change.
+
+---
+
+## Added 5 Sep 2026 — from the end-to-end field-parity audit
+
+See [`FIELD-PARITY.md`](FIELD-PARITY.md) for the full trace. Everything below is
+**verified against live data**, and **nothing has been deleted**.
+
+### Columns that exist but have never received a value
+
+| object | fill | notes |
+|---|---|---|
+| `offline_conversion_events.campaign_id` / `.adgroup_id` / `.creative_id` / `.target_id` / `.network` | **0 / 51,386** (30d) | Added 4 Sep for Google ValueTrack. No upstream path exists at any of the four required links (Ads final URL → funnel → `leads` → CallTools → pixel). Keep — but they are inert until that chain is built, and `leads` has no matching columns. |
+| `offline_conversion_events.offer` | **0 / 51,386** | Added 4 Sep. The Caliber pixel does not send `offer`. Inert until the POC updates the postback. |
+| `offline_conversion_events.call_type` | **0** | Neither pixel sends it. |
+| `offline_conversion_events.agent_name` / `.queue` | **0** | Caliber sends both keys on 100% of fires, always **empty**. Looks wired; carries nothing. |
+| `offline_conversion_events.caller_state` | 0 caliber / 1,715 ringba | Ringba CCO pixel only. |
+| `offline_conversion_events.calltools_call_id` | 0 caliber / 61 ringba | Near-dead. The `call_uuid` request in `docs/offline-cv-accuracy/PIXEL-FIELDS.md` §3 was never actioned. |
+| `leads.publisher` | **0 / 41,829** | Column + CallTools `pubid` + Caliber `attribution.publisher` all wired; no funnel sends it. |
+| `leads.click_timestamp` | **0 / 41,829** | Same — already noted below under "collected and never consumed", now quantified. |
+| `leads.ttclid` / `.li_fat_id` / `.twclid` / `.epik` | **0** | Captured by all five funnels, stored, forwarded to Caliber. Zero traffic from those sources. Correct to keep. |
+
+### CallTools fields we post that the account silently drops
+
+Proven from the API response echo over 1,419 contacts: `landing_page`, `needs`,
+`referrer`, `ip_address`, `user_agent` (plus the four future click ids) return **no key
+at all**. Not an orphan to delete — an account-configuration gap. Until the custom fields
+exist, the Ringba enrich URL cannot read them either.
+
+### Undocumented lead source
+
+`https://apply.nationalbenefitalliance.com/` posts to `submit-lead` — **153 leads in 2
+days, 6.3% of volume**, `utm_source=meta`. It is not in the `nba3` repo, not in
+`vercel.json`, sends no `landing_page`, no `needs`, and blank `street_address` / `city` /
+`annual_income` / `employment_status`. It is the current source of null-`landing_page`
+rows (not `apply/0`, which was fixed in `#38`). `_field_parity.py` cannot see it, so it
+will be skipped by every future funnel parity migration. **Adopt or retire.**
+
+### Reporting
+
+`lead_report_leads()` returns 14 of the 52 `leads` columns. Every field added since
+late August — `needs`, `landing_page`, `lead_source`, `publisher`, `age`,
+`consent_timestamp`, `caliber_*` — is invisible to the Sheet.
+
+### Confirmed still true
+
+Re-checked during this audit and unchanged: `ringba-conversion-webhook-test` (v2, still
+deployed), the five Sheet-era functions, `leads.lead_source` redundancy,
+`offline_conversion_events.ringba_call_id` + its mirror trigger,
+`status = 'ready_to_upload'`, and `v_offline_conversion_export.session_attributes` /
+`.user_agent` hardcoded to `NULL::text`.
