@@ -358,6 +358,9 @@ Deno.serve(async (req: Request) => {
     released: 0,
     batches: 0,
   };
+  // Named separately from the counters so the response can always SAY which
+  // audiences had no Google List ID — a bare "batches: 0" is not a diagnosis.
+  const audiencesWithoutDestination: string[] = [];
 
   // 1. Roll up the master and queue anyone newly monetized. This RPC carries its own
   //    raised statement_timeout; see the migration header for why that is required.
@@ -416,6 +419,7 @@ Deno.serve(async (req: Request) => {
     // check stays quiet; cm_release_awaiting() brings them back when the secret
     // appears. Never treat this as a failure.
     if (!audienceId) {
+      audiencesWithoutDestination.push(audienceKey);
       if (!validateOnly) {
         const { data, error } = await supabase.rpc("cm_mark_awaiting", { p_audience_key: audienceKey });
         if (error) console.error(`cm_mark_awaiting(${audienceKey}) failed:`, error);
@@ -499,10 +503,19 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // Always report the configuration the run actually saw. Audience IDs are never
+  // echoed — only which audience KEYS are configured — so the response is safe to
+  // paste into a ticket.
+  const config = {
+    enabled,
+    configured_audiences: Object.keys(audiences).sort(),
+    audiences_without_destination: audiencesWithoutDestination.sort(),
+  };
+
   if (validateOnly) {
-    return json({ ok: true, validate_only: true, ...counters, results: validateResults });
+    return json({ ok: true, validate_only: true, ...config, ...counters, results: validateResults });
   }
-  return json({ ok: true, enabled, ...counters });
+  return json({ ok: true, ...config, ...counters });
 });
 
 function json(body: unknown, status = 200): Response {
