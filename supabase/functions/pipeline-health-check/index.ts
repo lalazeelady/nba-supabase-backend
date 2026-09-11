@@ -53,6 +53,15 @@
 //      calls to the test action instead of CallConvertOffline. Secret VALUES are
 //      never emailed — only set/unset plus a last-4 fingerprint.
 //
+// CUSTOMER MATCH (added Sep 2026): a fourth, independent section watches the
+//   audience pipeline (upload-google-customer-match). It is ENTIRELY SILENT unless
+//   GOOGLE_CUSTOMER_MATCH_ENABLED=true, so building and dry-running that pipeline
+//   cannot page anyone. It is also strictly additive: every offline-conversion check
+//   above is untouched, and a Customer Match fault never changes what those report.
+//   Members parked at 'awaiting_destination' (a program whose Google audience does
+//   not exist yet) are excluded by cm_upload_backlog() — an unconfigured program is
+//   a to-do, not an outage.
+//
 // Auth (inbound): shared secret in `x-invoke-secret` (UPLOADER_INVOKE_SECRET).
 // Query params: ?dry_run=true (compute + return, never email) | ?force=true (email
 //   even if healthy, to test the wiring).
@@ -77,6 +86,8 @@ const FAILURE_MIN = 10;          // floor: ignore a trickle of naturally-unmatch
 const FAILURE_RATE = 0.20;       // ...and only alert when this share of attempts failed
 const PUBLISHER_DROP_WINDOW_H = 3;   // look back this far for publisher-gate drops
 const PUBLISHER_DROP_MIN = 5;        // ignore a trickle of genuine other-publisher traffic
+const CM_GRACE_H = 48;           // the CM cron is DAILY, so 48h = two missed runs
+const CM_BACKLOG_THRESHOLD = 100;// ignore a small queue between daily runs
 const ALERT_TO = "larazielin1@gmail.com";
 
 // Report a secret as set/unset with a last-4 fingerprint — enough to tell two
@@ -156,6 +167,87 @@ function auditConfig(): ConfigAudit {
       oauth_configured: oauthConfigured,
     },
   };
+}
+
+interface CustomerMatchAudit {
+  enabled: boolean;
+  ok: boolean;
+  problems: string[];
+  snapshot: Record<string, unknown>;
+}
+
+// Mirrors upload-google-customer-match's own env reads. Returns enabled:false and NO
+// problems while the pipeline is off, so nothing here can page during dry-run work.
+function auditCustomerMatch(): CustomerMatchAudit {
+  const enabled = (Deno.env.get("GOOGLE_CUSTOMER_MATCH_ENABLED") || "false").toLowerCase() === "true";
+  const audiences: Record<string, string> = {};
+  for (const [k, v] of Object.entries(Deno.env.toObject())) {
+    if (k.startsWith("GOOGLE_CM_AUDIENCE_ID_") && (v || "").trim()) {
+      audiences[k.slice("GOOGLE_CM_AUDIENCE_ID_".length).toLowerCase()] = v.trim();
+    }
+  }
+  const oauthConfigured = Boolean(
+    Deno.env.get("GOOGLE_CLIENT_ID") &&
+    Deno.env.get("GOOGLE_CLIENT_SECRET") &&
+    Deno.env.get("GOOGLE_REFRESH_TOKEN"),
+  );
+
+  const problems: string[] = [];
+  if (enabled) {
+    if (!audiences["all"]) {
+      problems.push(
+        "GOOGLE_CUSTOMER_MATCH_ENABLED is 'true' but GOOGLE_CM_AUDIENCE_ID_ALL is UNSET — " +
+        "every monetized caller is being parked at 'awaiting_destination' and NOTHING is " +
+        "reaching the universal Customer Match audience.",
+      );
+    }
+    if (!Deno.env.get("GOOGLE_ADS_CUSTOMER_ID")) {
+      problems.push(
+        "GOOGLE_ADS_CUSTOMER_ID is UNSET — the Customer Match uploader cannot build a " +
+        "destination and every batch fails as retryable until the attempt cap.",
+      );
+    }
+    if (!oauthConfigured) {
+      problems.push(
+        "Google OAuth secrets incomplete — Customer Match batches retry until the attempt cap, " +
+        "then go to 'failed'.",
+      );
+    }
+  }
+
+  return {
+    enabled,
+    ok: problems.length === 0,
+    problems,
+    snapshot: {
+      enabled,
+      audiences: Object.fromEntries(
+        Object.entries(audiences).map(([k, v]) => [k, fingerprint(v)]),
+      ),
+      oauth_configured: oauthConfigured,
+    },
+  };
+}
+
+interface CustomerMatchBacklog {
+  audience_key: string;
+  pending: number;
+  oldest_pending: string | null;
+}
+
+// Same contract as apiBacklogCount: null means the probe itself failed.
+async function customerMatchBacklog(
+  supabase: ReturnType<typeof createClient>,
+): Promise<CustomerMatchBacklog[] | null> {
+  const { data, error } = await supabase.rpc(
+    "cm_upload_backlog",
+    { grace_hours: CM_GRACE_H, max_attempts: MAX_ATTEMPTS } as unknown as undefined,
+  );
+  if (error) {
+    console.error("customer-match backlog probe failed:", error.message);
+    return null;
+  }
+  return (data ?? []) as unknown as CustomerMatchBacklog[];
 }
 
 // Returns null when the probe itself fails — the caller alerts on that separately
@@ -283,11 +375,15 @@ Deno.serve(async (req: Request) => {
   try {
     const config = auditConfig();
     const dropWindowIso = new Date(now - PUBLISHER_DROP_WINDOW_H * 3600000).toISOString();
-    const [backlog, lastUpload, failures, drops] = await Promise.all([
+    const cmConfig = auditCustomerMatch();
+    const [backlog, lastUpload, failures, drops, cmBacklog] = await Promise.all([
       apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
       failureStats(supabase),
       publisherDrops(supabase, dropWindowIso),
+      // Probed only when the audience pipeline is live. While it is off this stays
+      // null-by-choice and contributes nothing to `problems` or `alert`.
+      cmConfig.enabled ? customerMatchBacklog(supabase) : Promise.resolve([]),
     ]);
 
     // `config` stays a pure audit of the environment. Runtime faults (probe failures,
@@ -349,6 +445,31 @@ Deno.serve(async (req: Request) => {
     }
     const publisherDropping = drops !== null && drops.count >= PUBLISHER_DROP_MIN;
 
+    // ---- Customer Match (independent, silent while disabled) ----------------
+    // Appended AFTER the offline-conversion problems so the existing report reads
+    // identically when the audience pipeline is off.
+    problems.push(...cmConfig.problems);
+
+    const cmProbeFailed = cmConfig.enabled && cmBacklog === null;
+    if (cmProbeFailed) {
+      problems.push(
+        "Customer Match backlog probe cm_upload_backlog() failed — cannot tell whether audience " +
+        "members are being delivered.",
+      );
+    }
+    const cmStalledAudiences = (cmBacklog ?? []).filter((b) => b.pending >= CM_BACKLOG_THRESHOLD);
+    if (cmConfig.enabled && cmStalledAudiences.length > 0) {
+      problems.push(
+        `Customer Match delivery STALLED: ${cmStalledAudiences
+          .map((b) => `${b.audience_key}=${b.pending} pending (oldest ${b.oldest_pending ?? "?"})`)
+          .join("; ")}. These people were queued more than ${CM_GRACE_H}h ago and the daily ` +
+        "uploader has not delivered them. Probe safely with " +
+        "upload-google-customer-match?validate_only=true.",
+      );
+    }
+    const cmAlert = cmConfig.enabled &&
+      (!cmConfig.ok || cmProbeFailed || cmStalledAudiences.length > 0);
+
     report = {
       checked_at: new Date(now).toISOString(),
       problems,
@@ -371,6 +492,12 @@ Deno.serve(async (req: Request) => {
         rejecting,
       },
       config,
+      customer_match: {
+        ...cmConfig.snapshot,
+        probe: cmProbeFailed ? "failed" : "ok",
+        backlog: cmConfig.enabled ? (cmBacklog ?? null) : "not_enabled",
+        stalled: cmStalledAudiences.length > 0,
+      },
       thresholds: {
         stall_grace_min: STALL_GRACE_MIN,
         success_sla_min: SUCCESS_SLA_MIN,
@@ -379,11 +506,13 @@ Deno.serve(async (req: Request) => {
         failure_window_h: FAILURE_WINDOW_H,
         failure_min: FAILURE_MIN,
         failure_rate: FAILURE_RATE,
+        cm_grace_h: CM_GRACE_H,
+        cm_backlog_threshold: CM_BACKLOG_THRESHOLD,
       },
     };
 
     const alert = stalled || rejecting || backlogUnknown || failures === null ||
-      publisherDropping || drops === null || !config.ok;
+      publisherDropping || drops === null || !config.ok || cmAlert;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
@@ -393,6 +522,7 @@ Deno.serve(async (req: Request) => {
         if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
         if (publisherDropping) parts.push("PUBLISHER-GATE DROPS");
         if (!config.ok) parts.push("MISCONFIGURED");
+        if (cmAlert) parts.push("CUSTOMER MATCH");
         const subject = force && !alert
           ? "NBA offline-conversion health check — TEST (healthy)"
           : `⚠️ NBA offline conversions (Data Manager API) — ${parts.join(" + ")}`;
