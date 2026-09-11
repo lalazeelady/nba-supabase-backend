@@ -1,5 +1,21 @@
 # Setup — what only you can do
 
+> ## Deployment status — 11 Sep 2026
+>
+> | Step | State |
+> |---|---|
+> | Migration `20260911170000` (schema) | ✅ **Applied.** Master built: **63,765 people**, 71,933 calls, $942,690.67. `anon` cannot read it (verified). |
+> | `upload-google-customer-match` | ✅ **Deployed v2.** Verified: rollup ran, 63,765 members queued `pending`. |
+> | `pipeline-health-check` | ✅ **Deployed v9.** Verified `alert:false`, `problems:[]`, Customer Match section reporting `not_enabled`. Conversions pipeline unaffected (`backlog:0`). |
+> | **Secrets (§2 below)** | ⏳ **WAITING ON YOU.** Confirmed unset — the uploader reports `enabled:false`, `configured_audiences:[]`, `audiences_without_destination:["all"]`. |
+> | Validate against Google | ⏳ Blocked on the secrets |
+> | Backfill the 63,765 people | ⏳ Blocked on the secrets |
+> | Migration `20260911170100` (cron) | ⏳ Runs after the backfill is confirmed |
+>
+> **Nothing has reached Google yet.** The uploader is in dry-run until
+> `GOOGLE_CUSTOMER_MATCH_ENABLED=true`.
+
+
 Everything here is in the Google Ads or Supabase UI. No code depends on the order,
 but nothing reaches Google until steps 1 and 2 are done.
 
