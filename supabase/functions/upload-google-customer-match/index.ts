@@ -66,9 +66,23 @@ const BATCH_SIZE = Math.min(
   10_000,
   Number(Deno.env.get("GOOGLE_CM_BATCH_SIZE")) || 5_000,
 );
-const DEFAULT_LIMIT = 100_000;   // the whole 63.4k backfill fits in one invocation
+const DEFAULT_LIMIT = 100_000;   // the whole backfill fits in one invocation
 const MAX_ATTEMPTS = 6;
 const AUDIENCE_ENV_PREFIX = "GOOGLE_CM_AUDIENCE_ID_";
+
+// PostgREST caps EVERY response at db-max-rows (1,000 on this project) and does so
+// SILENTLY — `.limit(10000)` returns 1,000 rows with no error and no indication the
+// result was truncated. DECISIONS.md records the same trap for the reporting script.
+//
+// This is not merely a backfill inconvenience. Without paging, the nightly job would
+// deliver at most 1,000 people per run, forever, and report success every time: a
+// burst or a re-queue would drain in slow motion with no symptom anywhere. That is
+// the silent-stall class this whole pipeline is built to avoid.
+const PAGE_SIZE = 1_000;
+
+const QUEUE_COLUMNS =
+  "member_id, audience_key, member_key, upload_attempts, phone_e164, email, " +
+  "first_name, last_name, zip, state, country";
 
 interface QueueRow {
   member_id: string;
@@ -386,20 +400,37 @@ Deno.serve(async (req: Request) => {
     else counters.released += Number(data ?? 0);
   }
 
-  // 3. Read the pending queue. Indexed join only — no aggregation here.
-  const { data: queue, error: queueErr } = await supabase
-    .from("v_customer_match_upload_queue")
-    .select("member_id, audience_key, member_key, upload_attempts, phone_e164, email, first_name, last_name, zip, state, country")
-    .lt("upload_attempts", MAX_ATTEMPTS)
-    .order("first_seen_at", { ascending: true })
-    .limit(limit);
+  // 3. Read the pending queue, PAGED. Indexed join only — no aggregation here.
+  //
+  // Ordering is (first_seen_at, member_id), not first_seen_at alone. The backfill
+  // inserted all 63,765 rows in ONE transaction, so they share an identical
+  // first_seen_at — ordering by it alone is non-deterministic, and offset paging over
+  // a non-deterministic order silently skips and duplicates rows. member_id (the uuid
+  // primary key) is the unique tiebreaker that makes the order total.
+  //
+  // The whole page set is read BEFORE anything is uploaded, so the pending set cannot
+  // shift underneath the offsets mid-read.
+  const rows: QueueRow[] = [];
+  for (let from = 0; rows.length < limit; from += PAGE_SIZE) {
+    const want = Math.min(PAGE_SIZE, limit - rows.length);
+    const { data: page, error: queueErr } = await supabase
+      .from("v_customer_match_upload_queue")
+      .select(QUEUE_COLUMNS)
+      .lt("upload_attempts", MAX_ATTEMPTS)
+      .order("first_seen_at", { ascending: true })
+      .order("member_id", { ascending: true })
+      .range(from, from + want - 1);
 
-  if (queueErr) {
-    console.error("queue select failed:", queueErr);
-    return json({ error: queueErr.message }, 500);
+    if (queueErr) {
+      console.error("queue select failed:", queueErr);
+      return json({ error: queueErr.message }, 500);
+    }
+    const got = (page ?? []) as unknown as QueueRow[];
+    rows.push(...got);
+    // A short page means the queue is exhausted. Also guards against an empty first
+    // page turning the loop infinite.
+    if (got.length < want) break;
   }
-
-  const rows = (queue ?? []) as unknown as QueueRow[];
   counters.considered = rows.length;
 
   // 4. Group by audience — each audience is its own Google destination.
