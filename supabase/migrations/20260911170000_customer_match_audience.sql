@@ -30,6 +30,13 @@
 --
 -- Purely additive. No existing object is altered or dropped.
 
+-- Applying this migration BUILDS the materialized view, which runs the ~15s rollup
+-- once. Whatever role applies it may carry the 8s service_role default (migration
+-- 20260821000300), so raise it for this session or the CREATE MATERIALIZED VIEW below
+-- fails with "canceling statement due to statement timeout" part-way through.
+-- Session-scoped: it ends with the connection and changes nothing permanently.
+set statement_timeout = '300s';
+
 -- ---------------------------------------------------------------------------
 -- 1. Normalizers
 -- ---------------------------------------------------------------------------
