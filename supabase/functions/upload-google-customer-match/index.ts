@@ -66,7 +66,19 @@ const BATCH_SIZE = Math.min(
   10_000,
   Number(Deno.env.get("GOOGLE_CM_BATCH_SIZE")) || 5_000,
 );
-const DEFAULT_LIMIT = 100_000;   // the whole backfill fits in one invocation
+// Members considered per invocation when no ?limit is given. This is a hard
+// OPERATIONAL CEILING, not a preference: 25,000 members in one invocation returns
+// WORKER_RESOURCE_LIMIT (the edge worker runs out of memory holding the rows plus
+// their hashed payloads), while 10,000 is proven in production.
+//
+// The nightly cron passes limit=10000 explicitly, so it does not depend on this
+// value — but a manual invocation without ?limit would otherwise try the entire
+// backlog and blow the worker. Keep the two in step.
+//
+// Steady-state volume is a few hundred new people a day, so this is ~30x headroom.
+// A larger backlog drains at 10,000 per night and cm_upload_backlog() alerts if it
+// is still there after 48h.
+const DEFAULT_LIMIT = 10_000;
 const MAX_ATTEMPTS = 6;
 const AUDIENCE_ENV_PREFIX = "GOOGLE_CM_AUDIENCE_ID_";
 

@@ -113,52 +113,48 @@ Reused, already set: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH
 The OAuth refresh token already carries the `datamanager` scope, which covers
 `audienceMembers`. No new Google Cloud Console work is needed.
 
-## First run
+## Production state (2026-09-14)
 
-Do these in order. Steps 1–3 send nothing to Google.
+| Piece | State |
+|---|---|
+| `mv_monetized_callers` | Built — 63,765 people |
+| Audience `…1997` | 61,000 delivered. 2,765 pending — delivered by the next upload run |
+| `upload-google-customer-match-daily` — 09:35 UTC | **Active.** Invoked with `skip_refresh=true&limit=10000` |
+| `customer-match-refresh-daily` — 09:30 UTC | **Deactivated** until the Supabase compute size is upgraded. Until then, **no new** monetized callers are queued |
+| Secrets | `GOOGLE_CM_AUDIENCE_ID_ALL` and `GOOGLE_CUSTOMER_MATCH_ENABLED=true` set |
 
-```bash
-SB=https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/upload-google-customer-match
-SECRET=<UPLOADER_INVOKE_SECRET>
+After the compute upgrade, turn the rollup on (a row update, not DDL — safe):
+
+```sql
+select cron.alter_job(
+  (select jobid from cron.job where jobname = 'customer-match-refresh-daily'),
+  active := true);
 ```
 
-**1. Apply the schema migration only** (not the cron one yet).
+## Operational cautions — read before changing anything
 
-**2. Build the master and queue everyone.** Expect `master_rows` ≈ 63,698.
+Learned in production on 2026-09-11, when building this pipeline caused a lead-pipeline
+outage: **120 lead submissions and 56 conversion postbacks lost**, 20:50 UTC Friday to
+02:55 UTC Saturday.
 
-```bash
-curl -s -X POST "$SB?refresh_only=true" -H "x-invoke-secret: $SECRET" | jq
-```
-
-**3. Dry run.** `GOOGLE_CUSTOMER_MATCH_ENABLED` still unset. Logs the payload shape,
-reaches Google not at all, marks nothing.
-
-```bash
-curl -s -X POST "$SB?limit=10" -H "x-invoke-secret: $SECRET" | jq
-```
-
-**4. Set the secrets** — `GOOGLE_CM_AUDIENCE_ID_ALL` and
-`GOOGLE_CUSTOMER_MATCH_ENABLED=true`.
-
-**5. Validate against Google, writing nothing.** This is the step that proves the
-List ID, the OAuth token and the payload shape in one call. A wrong List ID returns
-`INVALID_DESTINATION` in seconds.
-
-```bash
-curl -s -X POST "$SB?validate_only=true&limit=100" -H "x-invoke-secret: $SECRET" | jq
-```
-
-**6. Backfill in chunks.** ~63,700 people is 13 batches of 5,000. Run it in pieces
-rather than one invocation, so a single run cannot hit the edge-function wall clock.
-Repeat until `considered` comes back `0`.
-
-```bash
-for i in $(seq 1 7); do
-  curl -s -X POST "$SB?limit=10000&skip_refresh=true" -H "x-invoke-secret: $SECRET" | jq -c
-done
-```
-
-**7. Apply the cron migration.** From here it is a few hundred people a night.
+1. **The instance is undersized.** 1.35 GB of data against ~384 MB of effective cache
+   (224 MB `shared_buffers`). A large scan evicts the cache; `count(*)` on `leads` went
+   from ~5 s to more than 60 s under load.
+2. **Never run the rollup through PostgREST** (no `?refresh_only=true`, no
+   `supabase.rpc('refresh_customer_match_members')`). It runs past the ~60 s gateway
+   timeout, strands connections, and exhausts the PostgREST pool that `submit-lead` and
+   the webhooks share. Run it only as SQL in pg_cron.
+3. **Any migration (DDL) forces a PostgREST schema-cache reload.** On this instance the
+   reload can stall, and while it does every API request fails with `PGRST002` —
+   lead inserts included. Apply DDL only in a quiet window, ideally after the compute
+   upgrade. Enabling, disabling or retiming a cron job is a row update and is safe.
+4. **PostgREST silently caps responses at 1,000 rows.** Page every read.
+5. **One uploader invocation handles at most ~10,000 members** — 25,000 returns
+   `WORKER_RESOURCE_LIMIT`.
+6. **Don't scan big unindexed tables during traffic:** `leads` (no `created_at`
+   index), `api_logs` (845 MB, no `created_at` index), `cron.job_run_details`,
+   `net._http_response`. Answer time-based questions from the Supabase log explorer.
+7. **Don't `pg_sleep` in SQL to wait for async work** — it holds a pooler connection.
 
 ## Verify
 
@@ -206,7 +202,7 @@ Once a pixel populates `offline_conversion_events.offer`:
 
 1. Create the audience in Google Ads Audience manager, note its **List ID**.
 2. Add the secret, e.g. `GOOGLE_CM_AUDIENCE_ID_ACA=<list id>`.
-3. Done. **No code change, no redeploy.**
+3. Done. **No code change, no redeploy** — provided the rollup job is active (see *Production state*).
 
 The uploader reads every `GOOGLE_CM_AUDIENCE_ID_*` secret at runtime, and the suffix
 lowercased is the `audience_key`. People who resolved to a program before its audience
@@ -222,7 +218,7 @@ so the subset relationship is maintained here, not by Google.
 | Undo | How |
 |---|---|
 | Stop sending, keep everything | Set `GOOGLE_CUSTOMER_MATCH_ENABLED=false`. Next run dry-runs. |
-| Stop the schedule | `select cron.unschedule('upload-google-customer-match-daily');` |
+| Stop the schedule | `select cron.unschedule('upload-google-customer-match-daily');` and `select cron.unschedule('customer-match-refresh-daily');` |
 | Stop one program | Remove that `GOOGLE_CM_AUDIENCE_ID_*` secret. Its members park, they are not lost. |
 | Requeue everything | `update customer_match_members set status='pending', upload_attempts=0;` Re-sending is harmless — Google de-duplicates on the hashed identifier. |
 | Full removal | Drop the two migrations' objects. Nothing else references them. |

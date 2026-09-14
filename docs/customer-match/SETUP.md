@@ -1,20 +1,18 @@
 # Setup — what only you can do
 
-> ## Deployment status — 11 Sep 2026
+> ## Deployment status — 14 Sep 2026
 >
 > | Step | State |
 > |---|---|
-> | Migration `20260911170000` (schema) | ✅ **Applied.** Master built: **63,765 people**, 71,933 calls, $942,690.67. `anon` cannot read it (verified). |
-> | `upload-google-customer-match` | ✅ **Deployed v2.** Verified: rollup ran, 63,765 members queued `pending`. |
-> | `pipeline-health-check` | ✅ **Deployed v9.** Verified `alert:false`, `problems:[]`, Customer Match section reporting `not_enabled`. Conversions pipeline unaffected (`backlog:0`). |
-> | **Secrets (§2 below)** | ⏳ **WAITING ON YOU.** Confirmed unset — the uploader reports `enabled:false`, `configured_audiences:[]`, `audiences_without_destination:["all"]`. |
-> | Validate against Google | ⏳ Blocked on the secrets |
-> | Backfill the 63,765 people | ⏳ Blocked on the secrets |
-> | Migration `20260911170100` (cron) | ⏳ Runs after the backfill is confirmed |
+> | Schema migration `20260911170000` | ✅ Applied |
+> | Cron migration `20260911170100` | ✅ Applied — upload job **active**, rollup job **deactivated** pending compute upgrade |
+> | `upload-google-customer-match` | ✅ v5 (matches `main`) |
+> | `pipeline-health-check` | ✅ v9 (matches `main`) |
+> | Secrets | ✅ Set |
+> | Backfill | ✅ 61,000 delivered; the remaining 2,765 go out on the next 09:35 UTC run |
 >
-> **Nothing has reached Google yet.** The uploader is in dry-run until
-> `GOOGLE_CUSTOMER_MATCH_ENABLED=true`.
-
+> **Before anything else on this project: upgrade the Supabase compute size.**
+> See README → *Operational cautions*.
 
 Everything here is in the Google Ads or Supabase UI. No code depends on the order,
 but nothing reaches Google until steps 1 and 2 are done.
@@ -77,14 +75,15 @@ exactly as the conversion uploader uses them.
 
 ## 3. Apply the migrations
 
-Supabase → SQL editor, in this order:
+Both are applied in production. For a fresh environment, apply them in order **in a
+quiet window** — applying DDL forces a PostgREST schema-cache reload, which on an
+undersized instance can fail lead inserts (README → *Operational cautions*, item 3).
 
 1. `20260911170000_customer_match_audience.sql` — schema. Sends nothing to Google.
-2. Run the backfill by hand (README, *First run*, steps 2–6).
-3. `20260911170100_schedule_customer_match_cron.sql` — the daily schedule.
+2. `20260911170100_schedule_customer_match_cron.sql` — the two daily jobs.
 
-The cron migration is separate on purpose: scheduling is what starts calling Google,
-and you can unschedule it with one statement without touching any schema.
+Do not seed the audience by calling the function with `?refresh_only=true`; that runs
+the rollup through PostgREST. Let the pg_cron rollup job build the queue.
 
 ---
 

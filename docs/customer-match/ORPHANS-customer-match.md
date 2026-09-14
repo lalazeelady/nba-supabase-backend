@@ -183,3 +183,15 @@ match rates.
 Checked during this build and all still live: `v_offline_conversion_export` (read by
 the conversion uploader), cron jobids 8/10/11, and `offline_conversion_events` itself —
 this pipeline only ever **reads** it.
+
+---
+
+## 7. Found 2026-09-14 — operational gaps (reported, not changed)
+
+| Item | Why it matters |
+|---|---|
+| `_shared/upload-providers/google-ads.ts` sends a `developer-token` header | Google sunset developer tokens on 2026-09-09 and will reject them in API releases from H1 2027. Nothing live uses this file (see §3), so there is no impact today — one more reason to delete the directory. Both live uploaders use the Data Manager API, which never needed a developer token. |
+| No index on `leads.created_at` | Every date-filtered query scans 160k rows. Build it with `CREATE INDEX CONCURRENTLY` in a quiet window after the compute upgrade — a plain build blocks lead inserts. An interrupted `CONCURRENTLY` build leaves an INVALID index: drop it and retry. |
+| `api_logs` is 845 MB (~520k rows) with no `created_at` index | Largest table, same scan risk. Consider retention or archiving. |
+| Webhooks return 200 when their own insert fails | Ringba/Caliber never retry, so a database hiccup silently drops conversions — 56 on 2026-09-11. Visible only in function logs. Worth a health-check alert. |
+| Health-check email subject always reads "Offline-conversion pipeline" | A Customer Match-only problem arrives under a conversions subject and reads as "conversions are broken." Worth giving each section its own subject line. |
