@@ -46,3 +46,23 @@ Tracked here so they don't get "fixed" twice.
   traffic only; these are EU/UK requirements. Keep the plumbing, expect nulls.
 - `click_timestamp` — a column and a Caliber field now exist, but no funnel
   captures it yet. Populating it is a site-repo change.
+
+---
+
+## Added 11 Sep 2026 — Customer Match build
+
+Branch `gads-customer-match-datamanager-api` moved Google Ads **Customer Match** off
+the manual Google Sheet onto the Data Manager API, mirroring the Sep-2026
+offline-conversion cutover.
+
+Its orphan list and findings live in
+[`docs/customer-match/ORPHANS-customer-match.md`](docs/customer-match/ORPHANS-customer-match.md).
+Highlights, none of them acted on:
+
+| Item | Verdict |
+|---|---|
+| `NBA Google Customer Match` Google Sheet | Superseded. Holds ~63k people's name/email/phone/address in **plaintext in Drive**. Turn off any Google Ads scheduled import first, then delete. |
+| `supabase/functions/_shared/upload-providers/` (6 files, ~490 lines) | **Fully orphaned** — no deployed function imports it (grep-confirmed). It is a second, divergent copy of the Data Manager provider. Safe to delete. |
+| `v_offline_conversion_export` + 2 sibling views readable by `anon` | ⚠️ **Pre-existing PII exposure.** No `security_invoker`, so they bypass RLS on `leads`; the publishable key can read email/phone/name/zip. Fix suggested, not applied. |
+| Dry runs bump `upload_attempts` in `upload-google-offline-conversions` | ⚠️ **Pre-existing latent bug.** Six dry-run cycles push a row past `MAX_ATTEMPTS` permanently, invisibly. Not biting while the path is live. |
+| `offline_conversion_events.offer` | Still 0 / 71,936. NOT an orphan — it is the hook the per-program audiences hang on. |
