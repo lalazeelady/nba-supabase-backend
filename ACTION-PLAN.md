@@ -213,13 +213,29 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
   - Part B — retries (nice to have): ask Ringba, Caliber and CallTools whether they retry
     pixels that get a non-2xx response. If yes, return 5xx on a failed save.
 - [~] **P3.3 Move every postback pixel to the platform-neutral names, then retire the old ones** · You (vendors), then Claude
-  - **Done 2026-09-15:** `postback-conversion-webhook` and `postback-transfer-webhook` deployed
+  - **Done 2026-09-15:** `postback-monetize-webhook` (owner renamed it the same day from
+    `postback-conversion-webhook`, which is now an orphan with 0 senders) and `postback-transfer-webhook` deployed
     (v1, `verify_jwt=false`). They are exact copies of live `ringba-conversion-webhook` v47 and
     `ringba-transfer-webhook` v17; only the header comment and the `endpoint` log label differ.
     Tested: HTTP 401 without the secret; a wrong-publisher request with the secret in the header is
     dropped (200, `non-nba-publisher`), `cv_source`/`offer`/`event` read correctly, 0 event rows.
     The repo `ringba-*` files were synced to live first (the conversion file had comment drift).
-    Caliber Postback Spec rev 4 published with the new URLs and no secret on the page.
+    Caliber Postback Spec rev 5 published (same link, no secret on the page).
+  - **Rev 5 contract (owner, 2026-09-15):** endpoints `postback-transfer-webhook` and
+    `postback-monetize-webhook`. `event` removed from the URLs — the endpoint sets the event (the
+    code still accepts `event`). The CallTools call id is sent as `call_id`, so it feeds the per-call
+    dedupe key and the order id with no code change. `source=caliber`. Offer codes EDU, ENE, MED,
+    ACA, DEB, TAX, SSD — stored lower case; `cm_program()` uses them as-is, so per-program audience
+    secrets become `GOOGLE_CM_AUDIENCE_ID_ENE` etc. (P4.4). URLs carry only the owner's required
+    CALL fields (caller_id, call_id, publisher, ib_source, source, offer, conversion_time,
+    conversion_value) and LEAD fields (transaction_id, gclid, gbraid, email, state).
+    Tested: each endpoint resolves its own event without `event`; 0 rows on a wrong publisher.
+  - **Open — owner to align before any code change:**
+    (a) enforce `caller_id` and `call_id` as must-have (today only `publisher` is enforced);
+    (b) response codes for rejected postbacks instead of silent HTTP 200 drops;
+    (c) redesign: one raw postback table (required fields as columns, rest in the payload) that
+    feeds matched upload tables per platform (Google, Bing), with reporting fields joined from
+    `leads` instead of copied at ingest.
   - Senders still on the old names (24 h to 2026-09-15 3pm ET):
     legacy Caliber Internet pixel → `ringba-conversion-webhook` (~800, sends `status`, no `cv_source`);
     Ringba revenue → `ringba-conversion-webhook` (~300); Ringba transfer → `ringba-transfer-webhook`
@@ -405,7 +421,8 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 | Function | ID | Deployed |
 |---|---|---|
 | `submit-lead` | `fe9e14ca-9bd3-467e-a027-0ac9797e1038` | v63 |
-| `postback-conversion-webhook` | `192ff776-bcbf-452a-9fdb-922b81b458dc` | v1 — new name, 2026-09-15 (P3.3) |
+| `postback-monetize-webhook` | `4a1f69dd-847b-4c6e-85df-dd7a10b54735` | v1 — new name, 2026-09-15 (P3.3) |
+| `postback-conversion-webhook` | `192ff776-bcbf-452a-9fdb-922b81b458dc` | v1 — **orphan**, replaced by `postback-monetize-webhook` the same day; 0 senders. Delete in the dashboard (P3.3) |
 | `postback-transfer-webhook` | `ca293960-b637-451b-a1ae-91b80bdeb11b` | v1 — new name, 2026-09-15 (P3.3) |
 | `ringba-conversion-webhook` | `1556053b-fd2e-4e51-b81a-d8ff369762ad` | v47 — old name, retire after P3.3 |
 | `ringba-transfer-webhook` | `a1569e18-5995-4759-876d-720541e2e855` | v17 — old name, retire after P3.3 |

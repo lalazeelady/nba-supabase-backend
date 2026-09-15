@@ -1,4 +1,4 @@
-// postback-conversion-webhook
+// postback-monetize-webhook
 //
 // Platform-neutral name for ringba-conversion-webhook (2026-09-15, Ringba -> Caliber move).
 // The code is an exact copy of the live ringba-conversion-webhook. Only this header and the
@@ -821,7 +821,7 @@ Deno.serve(async (req: Request) => {
         conversion_value, conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
         cv_source: source, offer, per_call_dedupe: !collapsePhoneDay,
-        endpoint: "postback-conversion-webhook", resolved_event: eventKind,
+        endpoint: "postback-monetize-webhook", resolved_event: eventKind,
       },
     } as object,
     response_payload: {
