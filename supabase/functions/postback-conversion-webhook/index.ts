@@ -1,3 +1,11 @@
+// postback-conversion-webhook
+//
+// Platform-neutral name for ringba-conversion-webhook (2026-09-15, Ringba -> Caliber move).
+// The code is an exact copy of the live ringba-conversion-webhook. Only this header and the
+// `endpoint` log label differ. Both functions stay deployed until every pixel points here.
+// KEEP THE TWO IN LOCKSTEP: any code change goes to both, or retire the old one first.
+//
+// --- original header follows ---
 // ringba-conversion-webhook
 //
 // Receives offline-conversion postbacks from Ringba (a monetized/converted
@@ -813,7 +821,7 @@ Deno.serve(async (req: Request) => {
         conversion_value, conversion_time: conversion_time.toISOString(),
         currency_code, transaction_id, caller_id, event_type: EVENT_TYPE,
         cv_source: source, offer, per_call_dedupe: !collapsePhoneDay,
-        endpoint: "ringba-conversion-webhook", resolved_event: eventKind,
+        endpoint: "postback-conversion-webhook", resolved_event: eventKind,
       },
     } as object,
     response_payload: {

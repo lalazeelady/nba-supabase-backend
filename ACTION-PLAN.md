@@ -212,6 +212,32 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     to save. Small change, no DDL.
   - Part B — retries (nice to have): ask Ringba, Caliber and CallTools whether they retry
     pixels that get a non-2xx response. If yes, return 5xx on a failed save.
+- [~] **P3.3 Move every postback pixel to the platform-neutral names, then retire the old ones** · You (vendors), then Claude
+  - **Done 2026-09-15:** `postback-conversion-webhook` and `postback-transfer-webhook` deployed
+    (v1, `verify_jwt=false`). They are exact copies of live `ringba-conversion-webhook` v47 and
+    `ringba-transfer-webhook` v17; only the header comment and the `endpoint` log label differ.
+    Tested: HTTP 401 without the secret; a wrong-publisher request with the secret in the header is
+    dropped (200, `non-nba-publisher`), `cv_source`/`offer`/`event` read correctly, 0 event rows.
+    The repo `ringba-*` files were synced to live first (the conversion file had comment drift).
+    Caliber Postback Spec rev 4 published with the new URLs and no secret on the page.
+  - Senders still on the old names (24 h to 2026-09-15 3pm ET):
+    legacy Caliber Internet pixel → `ringba-conversion-webhook` (~800, sends `status`, no `cv_source`);
+    Ringba revenue → `ringba-conversion-webhook` (~300); Ringba transfer → `ringba-transfer-webhook`
+    (~550); CallTools test pixel → `ringba-conversion-webhook-test` (P3.1).
+  - Do, in order: (1) new Caliber Energy postbacks go on the new names. (2) Move each existing pixel
+    with its parameters unchanged — a URL change alone does not change behaviour. (Adding
+    `cv_source` to the legacy Caliber Internet pixel changes its dedupe grain: separate decision.)
+    (3) Confirm 0 requests to the old names for 7 days in the log explorer. (4) Delete
+    `ringba-conversion-webhook` and `ringba-transfer-webhook` and their repo folders.
+  - **Rule until step 4:** any code change goes to BOTH copies of each function (lockstep). Each
+    `postback-*` file says so in its header.
+  - The log label `request_payload.source` stays `ringba-webhook` / `ringba-transfer-webhook` on
+    purpose, so existing log queries still find traffic from both names.
+- [ ] **P3.4 Rotate `RINGBA_WEBHOOK_SECRET`** · You + Claude · after P3.3
+  - Why: Caliber Postback Spec rev 3 showed the live secret to anyone with the link, and pixels
+    that send `?secret=` write it to the edge logs.
+  - Do after P3.3 step 2, so fewer pixels need the new value: set the new secret and update every
+    remaining pixel in the same window. Tell Caliber the new value outside the spec page.
 
 ## Phase 4 — Customer Match follow-through
 
@@ -379,8 +405,10 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 | Function | ID | Deployed |
 |---|---|---|
 | `submit-lead` | `fe9e14ca-9bd3-467e-a027-0ac9797e1038` | v63 |
-| `ringba-conversion-webhook` | `1556053b-fd2e-4e51-b81a-d8ff369762ad` | v46 |
-| `ringba-transfer-webhook` | `a1569e18-5995-4759-876d-720541e2e855` | v16 |
+| `postback-conversion-webhook` | `192ff776-bcbf-452a-9fdb-922b81b458dc` | v1 — new name, 2026-09-15 (P3.3) |
+| `postback-transfer-webhook` | `ca293960-b637-451b-a1ae-91b80bdeb11b` | v1 — new name, 2026-09-15 (P3.3) |
+| `ringba-conversion-webhook` | `1556053b-fd2e-4e51-b81a-d8ff369762ad` | v47 — old name, retire after P3.3 |
+| `ringba-transfer-webhook` | `a1569e18-5995-4759-876d-720541e2e855` | v17 — old name, retire after P3.3 |
 | `upload-google-offline-conversions` | `8e25a878-1d52-4d01-a83f-476cb00f1a4e` | v43 |
 | `upload-google-customer-match` | `bfa3034a-344f-457b-9d5c-fb41f7516826` | v5 |
 | `pipeline-health-check` | `8a6a1519-187f-4bb6-89cf-d16fafa351f8` | v9 |
