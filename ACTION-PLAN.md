@@ -81,17 +81,29 @@ Full detail: `docs/customer-match/README.md` → *Operational cautions*.
 
 ## Phase 1 — Time-sensitive (next 48 hours)
 
-- [ ] **P1.1 Read the recovery-scan result** · Claude · after 12:45am ET 2026-09-15
+- [x] **P1.1 Read the recovery-scan result** · Claude · after 12:45am ET 2026-09-15 · **done 2026-09-15:** `found` = 21 (18 revenue, 3 transfers). 1 was already replayed on 9/14, so 20 remain for P1.2.
   - Why: finds the saved payloads of the 61 conversions lost on 9/11.
   - Do: read `api_logs` where `transaction_id = 'recovery-scan:2026-09-15'` (indexed
     lookup). Report `found`. If no row exists, check `cron.job` for
     `cv-recovery-scan-once` (job 14). If it is still there, it failed: unschedule it.
-- [ ] **P1.2 Replay the recovered conversions** · You approve, Claude does
+- [~] **P1.2 Replay the recovered conversions** · You approve, Claude does
+  - **Replayed 2026-09-15, 8:56–8:58am ET** (owner approved). 19 rows inserted, all with a
+    9/11 conversion date and all in `v_offline_conversion_export`: 16 revenue ($180 = 14
+    Caliber × $6 + $80 + $16) and 3 Ringba transfers. The DB trigger also added 14 Caliber
+    transfer rows.
+  - Not inserted, on purpose: Caliber $6 `a0dd103a…`. The same caller already had a 9/11
+    revenue row that uploaded on 9/11 (phone + ET-day dedupe rule). `RGB4F8D…` ($10) was
+    already replayed on 9/14.
+  - Method: `net.http_post` from SQL. Body = saved payload without `secret`; secret in the
+    `x-webhook-secret` header (not in URLs or logs). The 15 Caliber payloads had an empty
+    `conversion_time`, so each got its original 9/11 arrival time (`api_logs.created_at`).
+    One test row first, then the rest; the Ringba transfer for `RGB4D44…` before its revenue row.
+  - Open: confirm all rows reach `status = 'uploaded'`.
   - Do: re-send each saved payload to its own webhook. The webhook de-duplicates on the
     call ID, so a replay is safe. Confirm each row reaches `status = 'uploaded'`.
   - Deadline: the uploader skips conversions older than 85 days → **2026-12-05**.
   - Depends: P1.1.
-- [ ] **P1.3 Verify the first Customer Match upload run** · Claude · after 5:35am ET 2026-09-15
+- [x] **P1.3 Verify the first Customer Match upload run** · Claude · after 5:35am ET 2026-09-15 · **done 2026-09-15:** 63,765 of 63,765 members `uploaded`, 0 `pending`. Job 13 succeeded at 5:35am ET.
   - Done when: `customer_match_members` shows 0 `pending`, and the hourly
     "Customer Match delivery STALLED" email stops.
 - [x] **P1.4 Upgrade Supabase compute: Micro → Small** · You · **done 2026-09-14 9:01pm ET**, during the outage (confirmed: `max_connections` 90, `shared_buffers` 512 MB)
@@ -146,12 +158,20 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 
 ## Phase 2 — Performance fixes (after the upgrade · quiet window 3–8am ET)
 
-- [ ] **P2.1 Fix the rematch job** · Claude · DDL
+- [~] **P2.1 Fix the rematch job** · Claude · DDL
   - Why: `rematch_offline_conversion_events()` runs every 10 min, averages 68s, and causes
     **68% of all disk reads**. Each run re-checks every unmatched conversion since April.
   - Do: limit it to conversions that can still reach Google (not yet uploaded, inside the
     85-day window). Keep behaviour identical for those rows.
   - Done when: its average run time in `pg_stat_statements` is under ~2s.
+  - **Interim, 2026-09-15 8:27am ET (no DDL):** cron job 11 now runs the limited SQL inline
+    (`uploaded_at is null`, eligible status, `conversion_time` ≤ 85 days) and is on again.
+    First run 8:30am ET: **succeeded in 0.19 s** (was: 2-minute timeout). Rows checked:
+    step 1 34,252 → ~141, step 2 77,506 → ~1,700 (index `offline_conversion_events_api_unsent_idx`).
+  - **Still to do:** apply `supabase/migrations/20260916070000_bound_rematch_to_uploadable_rows.sql`
+    in the 3–8am ET window. It puts the same limit in the function and points the cron job
+    back at the function. Branch `fix-rematch-job-scope`. Until then the function itself is
+    still the unlimited version — do not call it by hand.
 - [ ] **P2.2 Fix the health check's full scan of `api_logs`** · Claude
   - Why: the publisher-drop probe reads all 847 MB every hour — **17% of disk reads**.
   - Option A (no DDL): the webhooks write `api_type = 'publisher-drop'` on those log
