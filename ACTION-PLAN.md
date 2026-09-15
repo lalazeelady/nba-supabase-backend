@@ -231,9 +231,10 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     conversion_value) and LEAD fields (transaction_id, gclid, gbraid, email, state).
     Tested: each endpoint resolves its own event without `event`; 0 rows on a wrong publisher.
   - **Open — owner to align before any code change:**
-    (a) enforce `caller_id` and `call_id` as must-have (today only `publisher` is enforced);
-    (b) response codes for rejected postbacks instead of silent HTTP 200 drops;
-    (c) redesign: one raw postback table (required fields as columns, rest in the payload) that
+    (a) DONE 2026-09-15 on the postback-* endpoints only — `caller_id` and `call_id` must-have;
+    (b) DONE 2026-09-15 on the postback-* endpoints only — 422 for rejects, 503 for save failures.
+        Still ask Caliber whether they retry on 5xx (P3.2 Part B);
+    (c) ON HOLD (owner, 2026-09-15) — redesign: one raw postback table (required fields as columns, rest in the payload) that
     feeds matched upload tables per platform (Google, Bing), with reporting fields joined from
     `leads` instead of copied at ingest.
   - Senders still on the old names (24 h to 2026-09-15 3pm ET):
@@ -241,12 +242,17 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     Ringba revenue → `ringba-conversion-webhook` (~300); Ringba transfer → `ringba-transfer-webhook`
     (~550); CallTools test pixel → `ringba-conversion-webhook-test` (P3.1).
   - Do, in order: (1) new Caliber Energy postbacks go on the new names. (2) Move each existing pixel
-    with its parameters unchanged — a URL change alone does not change behaviour. (Adding
+    only after confirming it sends caller_id, a call id and publisher=NBA on every fire: since
+    2026-09-15 the postback-* endpoints reject anything else with HTTP 422 (the ringba-* ones do not). (Adding
     `cv_source` to the legacy Caliber Internet pixel changes its dedupe grain: separate decision.)
     (3) Confirm 0 requests to the old names for 7 days in the log explorer. (4) Delete
     `ringba-conversion-webhook` and `ringba-transfer-webhook` and their repo folders.
-  - **Rule until step 4:** any code change goes to BOTH copies of each function (lockstep). Each
-    `postback-*` file says so in its header.
+  - **Forked 2026-09-15 (owner):** the `postback-*` endpoints have a STRICT contract — HTTP 422 when
+    `publisher` is not NBA, `caller_id` has fewer than 10 digits, or `call_id` is missing; HTTP 503
+    when the save fails, so the sender retries. The `ringba-*` endpoints keep the lenient HTTP 200
+    behaviour so Ringba and the legacy Caliber Internet pixel do not break. The lockstep rule no
+    longer applies: do not copy changes between the two without review. A wrong publisher still
+    logs `reason: non-nba-publisher`, so the health-check publisher-drop alert keeps working.
   - The log label `request_payload.source` stays `ringba-webhook` / `ringba-transfer-webhook` on
     purpose, so existing log queries still find traffic from both names.
 - [ ] **P3.4 Rotate `RINGBA_WEBHOOK_SECRET`** · You + Claude · after P3.3

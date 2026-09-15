@@ -1,9 +1,16 @@
 // postback-transfer-webhook
 //
-// Platform-neutral name for ringba-transfer-webhook (2026-09-15, Ringba -> Caliber move).
-// The code is an exact copy of the live ringba-transfer-webhook. Only this header and the
-// `endpoint` log label differ. Both functions stay deployed until every pixel points here.
-// KEEP THE TWO IN LOCKSTEP: any code change goes to both, or retire the old one first.
+// Caliber postbacks under a platform-neutral name (2026-09-15). Forked from ringba-transfer-webhook
+// with a STRICT contract. The legacy ringba-transfer-webhook keeps its lenient behaviour for Ringba
+// and the old Caliber Internet pixel. Do not copy these changes back, and review before
+// copying any ringba-transfer-webhook change here.
+//
+// Strict contract (Caliber Postback Spec rev 6):
+//   - publisher must be NBA, caller_id must have at least 10 digits, and call_id (the
+//     CallTools call id) must be present. Otherwise: HTTP 422 naming every problem.
+//   - A failed save answers HTTP 503 so the sender retries. A retry of a call we already
+//     saved is a no-op (dedupe_key), so a retry is safe.
+//   - The "always returns 200" notes in the original header below no longer apply.
 //
 // --- original header follows ---
 // ringba-transfer-webhook
@@ -549,29 +556,48 @@ Deno.serve(async (req: Request) => {
     ? 0
     : (parseNumber(pick(merged, FIELD_VARIANTS.conversion_value)) ?? 0);
 
-  // Ingress filter: only NBA-publisher transfers become rows (parity with the
-  // revenue webhook). Log-and-drop others; return 200 so Ringba won't retry.
-  if ((publisher || "").trim().toUpperCase() !== "NBA") {
+  // Strict contract (postback-* only): a postback missing a must-have field is REJECTED
+  // with HTTP 422 that names every problem, so the sender sees it in its own delivery log.
+  // The legacy ringba-* endpoints keep the lenient HTTP 200 drop for Ringba and the old
+  // Caliber Internet pixel. `reason` stays 'non-nba-publisher' when the publisher is wrong
+  // so the pipeline-health-check publisher-drop alert keeps working.
+  const callerDigits = (caller_id || "").replace(/\D/g, "");
+  const contractErrors: { field: string; problem: string; received?: string | null }[] = [];
+  const publisherOk = (publisher || "").trim().toUpperCase() === "NBA";
+  if (!publisherOk) {
+    contractErrors.push({ field: "publisher", problem: "must be exactly NBA", received: publisher || null });
+  }
+  if (callerDigits.length < 10) {
+    contractErrors.push({ field: "caller_id", problem: "missing or fewer than 10 digits", received: caller_id || null });
+  }
+  if (!conversion_call_id) {
+    contractErrors.push({ field: "call_id", problem: "missing: send the CallTools call id" });
+  }
+  if (contractErrors.length > 0) {
     await supabase.from("api_logs").insert({
+      api_type: `cv-${spec.log_tag}-${source}-rejected`,
       lead_id: null,
-      transaction_id: transaction_id || conversion_call_id || "ringba-transfer-unknown",
+      transaction_id: transaction_id || conversion_call_id || "postback-rejected",
       caller_id: caller_id || "",
       request_payload: { source: "ringba-transfer-webhook", raw: rawPayload } as object,
       response_payload: {
-        skipped: true, reason: "non-nba-publisher", publisher: publisher || null,
+        rejected: true,
+        reason: publisherOk ? "missing-required-fields" : "non-nba-publisher",
+        errors: contractErrors,
+        publisher: publisher || null,
         cv_source: source, offer, event: eventKind,
       } as object,
-      http_status: 200,
-      success: true,
-      error_message: null,
+      http_status: 422,
+      success: false,
+      error_message: `rejected: ${contractErrors.map((e) => e.field).join(", ")}`,
     });
     return new Response(
       JSON.stringify({
-        ok: true, stored: false, skipped: "non-nba-publisher",
-        publisher_received: publisher || null,
-        hint: "publisher must be exactly 'NBA'; tell the NBA team the value you send and they will map it",
+        ok: false, stored: false, error: "missing_or_invalid_required_fields",
+        errors: contractErrors,
+        hint: "fix these fields and fire again; if your publisher value is not exactly 'NBA', tell the NBA team what you send",
       }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 
@@ -733,13 +759,13 @@ Deno.serve(async (req: Request) => {
         caller_id: caller_id || "",
         request_payload: rawPayload as object,
         response_payload: { error: insertErr.message } as object,
-        http_status: 500,
+        http_status: 503,
         success: false,
         error_message: `ringba-transfer-webhook insert failed: ${insertErr.message}`,
       });
       return new Response(
-        JSON.stringify({ ok: true, stored: false }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        JSON.stringify({ ok: false, stored: false, error: "save_failed", retry: true }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
