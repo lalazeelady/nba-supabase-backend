@@ -86,7 +86,7 @@ Full detail: `docs/customer-match/README.md` → *Operational cautions*.
   - Do: read `api_logs` where `transaction_id = 'recovery-scan:2026-09-15'` (indexed
     lookup). Report `found`. If no row exists, check `cron.job` for
     `cv-recovery-scan-once` (job 14). If it is still there, it failed: unschedule it.
-- [~] **P1.2 Replay the recovered conversions** · You approve, Claude does
+- [x] **P1.2 Replay the recovered conversions** · You approve, Claude does · **done 2026-09-15:** all 33 replayed rows (16 revenue, $180; 17 transfers) `uploaded`, 0 errors (checked 2:59pm ET).
   - **Replayed 2026-09-15, 8:56–8:58am ET** (owner approved). 19 rows inserted, all with a
     9/11 conversion date and all in `v_offline_conversion_export`: 16 revenue ($180 = 14
     Caliber × $6 + $80 + $16) and 3 Ringba transfers. The DB trigger also added 14 Caliber
