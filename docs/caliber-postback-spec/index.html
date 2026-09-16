@@ -1,0 +1,384 @@
+<title>Caliber Postback Spec</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --navy:#1a2b47; --navy-lift:#24406b; --amber:#b06f05;
+    --ground:#f4f5f8; --surface:#ffffff; --sunk:#eceff4; --code:#1d2531;
+    --code-ink:#d7dde7; --code-dim:#8b97ab; --code-key:#e8b34a;
+    --ink:#161c26; --ink-2:#4a5464; --ink-3:#79839a;
+    --rule:#d5dae4; --rule-soft:#e5e9f0;
+    --ok:#1a6b47; --ok-bg:#e2f0e9;
+    --warn:#8a5a05; --warn-bg:#fbeed2;
+    --stop:#a32c22; --stop-bg:#f8e2e0;
+    --lead:#24406b; --lead-bg:#e3eaf5;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --disp:'Archivo','Helvetica Neue',Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --navy:#c3d3ee; --navy-lift:#9fb8dd; --amber:#e6a53c;
+      --ground:#12161d; --surface:#181d26; --sunk:#1f2632; --code:#0d1117;
+      --code-ink:#d7dde7; --code-dim:#8b97ab; --code-key:#e8b34a;
+      --ink:#e7ebf2; --ink-2:#aab3c2; --ink-3:#7b8598;
+      --rule:#2c3542; --rule-soft:#232b36;
+      --ok:#5fc79a; --ok-bg:#12352a;
+      --warn:#e0b163; --warn-bg:#3a2e12;
+      --stop:#f08a7e; --stop-bg:#3d1c19;
+      --lead:#9fb8dd; --lead-bg:#1c2a40;
+    }
+  }
+  :root[data-theme="dark"]{
+    --navy:#c3d3ee; --navy-lift:#9fb8dd; --amber:#e6a53c;
+    --ground:#12161d; --surface:#181d26; --sunk:#1f2632; --code:#0d1117;
+    --code-ink:#d7dde7; --code-dim:#8b97ab; --code-key:#e8b34a;
+    --ink:#e7ebf2; --ink-2:#aab3c2; --ink-3:#7b8598;
+    --rule:#2c3542; --rule-soft:#232b36;
+    --ok:#5fc79a; --ok-bg:#12352a;
+    --warn:#e0b163; --warn-bg:#3a2e12;
+    --stop:#f08a7e; --stop-bg:#3d1c19;
+    --lead:#9fb8dd; --lead-bg:#1c2a40;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 26px 90px}
+  h1,h2,h3{font-family:var(--disp);text-wrap:balance;margin:0}
+  a{color:var(--navy-lift)}
+  code{font-family:var(--mono);font-size:.87em;background:var(--sunk);padding:1px 5px;border-radius:3px}
+
+  header.mast{display:flex;flex-direction:column;gap:10px;padding-bottom:22px;border-bottom:2px solid var(--navy);margin-bottom:26px}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+  h1{font-size:36px;font-weight:700;letter-spacing:-.02em;line-height:1.1}
+
+  section{margin:0 0 42px}
+  h2{font-size:13px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--navy);padding-bottom:8px;border-bottom:1px solid var(--rule);margin-bottom:18px}
+  h3{font-size:20px;font-weight:600;letter-spacing:-.01em;margin-bottom:4px}
+  .sub{font-family:var(--mono);font-size:12px;color:var(--ink-3);margin-bottom:14px;letter-spacing:.02em}
+  p{margin:0 0 12px;max-width:74ch;color:var(--ink-2)}
+  ul{margin:0 0 12px;padding-left:20px;color:var(--ink-2);max-width:74ch}
+  li{margin-bottom:6px}
+  li::marker{color:var(--ink-3)}
+
+  /* Endpoint ledger: the two URLs a builder needs first. */
+  .endpoints{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:10px}
+  .ep{display:grid;grid-template-columns:minmax(150px,200px) 1fr;gap:4px 18px;background:var(--surface);padding:14px 17px;align-items:baseline}
+  .ep b{font-family:var(--disp);font-size:15px;font-weight:600;color:var(--ok)}
+  .ep .when{grid-column:1;font-size:13px;color:var(--ink-3)}
+  .ep .url{grid-column:2;grid-row:1 / span 2;font-family:var(--mono);font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+  .ep .url span{color:var(--ink-3)}
+
+  .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:14px}
+  .rule{background:var(--surface);padding:15px 17px}
+  .rule b{display:block;font-family:var(--disp);font-size:14px;font-weight:600;margin-bottom:5px;color:var(--ink)}
+  .rule.stop b{color:var(--stop)}
+  .rule p{font-size:13.5px;margin:0 0 6px}
+  .rule p:last-child{margin-bottom:0}
+  .rule pre{margin:8px 0 0;padding:10px 12px;background:var(--code);color:var(--code-ink);font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+
+  .urlbox{border:1px solid var(--rule);background:var(--code);margin:0 0 14px}
+  .urlbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.09)}
+  .urlbar span{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--code-dim)}
+  button.copy{font-family:var(--sans);font-size:12px;font-weight:600;color:#0f1319;background:#e8b34a;border:0;border-radius:4px;padding:5px 12px;cursor:pointer}
+  button.copy:hover{background:#f0c163}
+  button.copy:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .urlbox pre{margin:0;padding:14px 16px;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--code-ink);word-break:break-all;white-space:pre-wrap;overflow-wrap:anywhere}
+  .urlbox pre .k{color:var(--code-key)}
+  .urlbox .fallback{margin:0;padding:10px 16px 12px;border-top:1px solid rgba(255,255,255,.09);font-size:12.5px;color:var(--code-dim);max-width:none}
+  .urlbox .fallback code{background:rgba(255,255,255,.08);color:var(--code-ink)}
+
+  .legend{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin:0 0 10px;font-size:12.5px;color:var(--ink-2)}
+  .legend span{display:inline-flex;gap:6px;align-items:center}
+
+  .scroller{overflow-x:auto;border:1px solid var(--rule);background:var(--surface);margin-bottom:8px}
+  table{border-collapse:collapse;width:100%;min-width:660px;font-size:13.5px}
+  thead th{position:sticky;top:0;background:var(--surface);border-bottom:2px solid var(--navy);text-align:left;padding:10px 10px;font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--navy);z-index:2}
+  tbody td{border-bottom:1px solid var(--rule-soft);padding:9px 10px;vertical-align:top}
+  td.n{font-family:var(--mono);font-size:12px;color:var(--ink-3);width:34px;text-align:right;font-variant-numeric:tabular-nums}
+  /* Row numbers are generated, so inserting a parameter never means renumbering by hand. */
+  tbody{counter-reset:row}
+  tbody tr:not(.grp):not(.gnote){counter-increment:row}
+  td.n::before{content:counter(row)}
+  .p{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap}
+  td.d{color:var(--ink-2);line-height:1.5;min-width:300px}
+  tr.grp td{background:var(--sunk);font-family:var(--disp);font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-2);padding:7px 10px;border-bottom:1px solid var(--rule)}
+  tr.gnote td{background:var(--surface);border-bottom:1px solid var(--rule-soft);padding:8px 10px 10px;font-size:12.5px;color:var(--ink-2);line-height:1.5;font-style:italic}
+  .chip{display:inline-block;font-style:normal;font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;padding:2px 7px;border-radius:3px;white-space:nowrap}
+  .chip.must{background:var(--stop-bg);color:var(--stop)}
+  .chip.req{background:var(--warn-bg);color:var(--warn)}
+  .chip.lead{background:var(--lead-bg);color:var(--lead)}
+  .chip.opt{background:var(--sunk);color:var(--ink-3)}
+
+  .callout{background:var(--surface);border:1px solid var(--rule);border-left:3px solid var(--amber);padding:16px 18px;margin:0 0 14px}
+  .callout h3{font-size:16px;margin-bottom:6px}
+  .callout p:last-child{margin-bottom:0}
+  .footnote{font-size:13px;color:var(--ink-3)}
+  footer{margin-top:46px;padding-top:18px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+  @media (max-width:640px){
+    h1{font-size:28px}
+    .wrap{padding:26px 16px 70px}
+    .ep{grid-template-columns:1fr}
+    .ep .url{grid-column:1;grid-row:auto}
+  }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="eyebrow">National Benefit Alliance &middot; integration spec &middot; rev 9 &middot; 16 September 2026</div>
+  <h1>Caliber Postback Spec</h1>
+</header>
+
+<section>
+  <h2>Endpoints</h2>
+  <div class="endpoints">
+    <div class="ep">
+      <b>Transfer</b>
+      <span class="when">Fires on transfer connection to the buyer</span>
+      <span class="url"><span>https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/</span>postback-transfer-webhook</span>
+    </div>
+    <div class="ep">
+      <b>Monetize</b>
+      <span class="when">Fires when the call converts and revenue is known</span>
+      <span class="url"><span>https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/</span>postback-monetize-webhook</span>
+    </div>
+  </div>
+  <p class="footnote">Set these up for every offer except Internet, which keeps its current postback. Fire both for a call that transfers and converts. The endpoint sets the event type. GET with query parameters or POST (JSON or form) both work.</p>
+</section>
+
+<section>
+  <h2>Read these first</h2>
+  <div class="rules">
+    <div class="rule">
+      <b>Secret: sent to you separately</b>
+      <p>Send it in an <code>x-webhook-secret</code> header (preferred), or as <code>secret=&lt;secret&gt;</code> in the URL if your platform cannot set headers. A missing or wrong secret returns HTTP&nbsp;401.</p>
+    </div>
+    <div class="rule">
+      <b>Unknown parameters are ignored, not rejected</b>
+      <p>Extra parameters never cause an error. Response codes once the secret is accepted:</p>
+      <p><strong>200</strong> stored, or a re-fire of a call we already have &mdash; do not retry. <strong>422</strong> a must-have field is missing or wrong &mdash; fix it and fire again. <strong>503</strong> we could not save it &mdash; retry.</p>
+    </div>
+    <div class="rule stop">
+      <b><code>publisher</code> must be exactly <code>NBA</code></b>
+      <p>Hard-code <code>publisher=NBA</code> in the URL, as shown below. Any other value is rejected with HTTP&nbsp;422.</p>
+    </div>
+    <div class="rule stop">
+      <b><code>caller_id</code> is required</b>
+      <p>The caller's own phone, E.164 (<code>+15551234567</code>) &mdash; the number they call <em>from</em>, not the number they dialled. Missing or fewer than 10 digits is rejected with HTTP&nbsp;422.</p>
+    </div>
+    <div class="rule stop">
+      <b><code>caliber_call_id</code> is required</b>
+      <p>The Caliber call id: Caliber's own id for the call, set when CallTools transfers the call to Caliber and sends the data. Send the same id on the transfer and the monetize postback for one call. Missing is rejected with HTTP&nbsp;422.</p>
+    </div>
+    <div class="rule">
+      <b><code>call_id</code> is the CallTools call id</b>
+      <p>CallTools gives every call an id when the call starts. Send that id in <code>call_id</code>. Do not put the Caliber call id in <code>call_id</code>. A missing <code>call_id</code> is not rejected, but send it on every call.</p>
+    </div>
+    <div class="rule">
+      <b><code>conversion_time</code> comes from the current call</b>
+      <p>Never a time from a prior call.</p>
+      <p><strong>Transfer:</strong> the time the call was transfer-connected to the buyer.</p>
+      <p><strong>Monetize:</strong> the time the call converted; the call end time is next best, and transfer time next after that.</p>
+    </div>
+    <div class="rule">
+      <b>Send tokens resolved</b>
+      <p>If a field has no value, send the parameter empty &mdash; not <code>[tag:User:gclid]</code>, for example.</p>
+    </div>
+  </div>
+  <p class="footnote">A rejected postback returns every problem at once:</p>
+  <div class="urlbox">
+    <div class="urlbar"><span>HTTP 422 response</span></div>
+    <pre>{"ok":false,"stored":false,"error":"missing_or_invalid_required_fields",
+ "errors":[{"field":"caller_id","problem":"missing or fewer than 10 digits"},
+           {"field":"caliber_call_id","problem":"missing: send the Caliber call id"}]}</pre>
+  </div>
+</section>
+
+<section>
+  <h2>1 &middot; Transfer postback</h2>
+  <h3>Fire on: transfer connection to the buyer</h3>
+  <p class="sub">endpoint: postback-transfer-webhook</p>
+
+  <div class="urlbox">
+    <div class="urlbar"><span>Header</span><button class="copy" data-target="h1" type="button">Copy</button></div>
+    <pre id="h1"><span class="k">x-webhook-secret:</span> &lt;secret&gt;</pre>
+  </div>
+
+  <div class="urlbox">
+    <div class="urlbar"><span>Transfer URL</span><button class="copy" data-target="u1" type="button">Copy</button></div>
+    <pre id="u1">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-transfer-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
+  </div>
+
+  <div class="legend">
+    <span><i class="chip must">must have</i> rejected with HTTP 422 without it</span>
+    <span><i class="chip req">required</i> send it; the call still processes without it</span>
+    <span><i class="chip lead">required if lead</i> send it whenever lead information exists for the caller</span>
+    <span><i class="chip opt">optional</i> not in the URL; add it if you have it</span>
+  </div>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th></th><th>Parameter</th><th>Status</th><th>What it must contain</th></tr></thead>
+      <tbody>
+<tr class="grp"><td colspan="4">Call fields</td></tr>
+<tr><td class="n"></td><td><span class="p">caller_id</span></td><td><i class="chip must">must have</i></td><td class="d">Caller's own phone in E.164, e.g. <code>+15551234567</code> &mdash; the number they call from, not the number they dialled.</td></tr>
+<tr><td class="n"></td><td><span class="p">caliber_call_id</span></td><td><i class="chip must">must have</i></td><td class="d">The Caliber call id, set when CallTools transfers the call to Caliber. Same id on the transfer and the monetize postback for one call. A re-fire of the same call is ignored.</td></tr>
+<tr><td class="n"></td><td><span class="p">call_id</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools call id, set when the call starts in CallTools. Not the Caliber call id.</td></tr>
+<tr><td class="n"></td><td><span class="p">publisher</span></td><td><i class="chip must">must have</i></td><td class="d">Hard-coded <b>NBA</b>. Any other value is rejected (HTTP 422).</td></tr>
+<tr><td class="n"></td><td><span class="p">ib_source</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools route name of the number called, e.g. <code>Thank You Page</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">cv_source</span></td><td><i class="chip req">required</i></td><td class="d">Hard-coded <b>caliber</b>.</td></tr>
+<tr><td class="n"></td><td><span class="p">offer</span></td><td><i class="chip req">required</i></td><td class="d">The campaign or offer, pulled from the call &mdash; not hard-coded, so one postback serves every offer. Example values: <code>CPN_ENE</code>, <code>CPN_ACA</code>, <code>CPN_EDU</code>, <code>CPN_MED</code>. Hard-code it only if the value is not available. Tell the NBA team if your values differ.</td></tr>
+<tr><td class="n"></td><td><span class="p">conversion_time</span></td><td><i class="chip req">required</i></td><td class="d">The time this call was transfer-connected &mdash; from the current call, never a prior one. ISO-8601 UTC preferred. If empty, we use the time we received the postback.</td></tr>
+<tr><td class="n"></td><td><span class="p">queue</span></td><td><i class="chip opt">optional</i></td><td class="d">Queue name or id.</td></tr>
+<tr><td class="n"></td><td><span class="p">agent_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Agent who handled the call.</td></tr>
+<tr class="grp"><td colspan="4">Lead fields</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. For traffic from other sources, replace <code>gclid</code> and <code>gbraid</code> with that source's click id parameter, e.g. <code>msclkid</code> or <code>fbclid</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">transaction_id</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Our lead id: created in Supabase when the form is submitted and passed to CallTools and Caliber with the lead. Not a Caliber or CallTools transaction or lead id.</td></tr>
+<tr><td class="n"></td><td><span class="p">gclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id.</td></tr>
+<tr><td class="n"></td><td><span class="p">gbraid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id for iOS app-to-web.</td></tr>
+<tr><td class="n"></td><td><span class="p">email</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Hashed on our side. The strongest identifier for matching a call to a click.</td></tr>
+<tr><td class="n"></td><td><span class="p">state</span></td><td><i class="chip lead">required if lead</i></td><td class="d">The state the caller provided &mdash; not the state of the caller id.</td></tr>
+<tr class="grp"><td colspan="4">Additional lead fields</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Not in the URL above. Add any you have: each is accepted and stored today.</td></tr>
+<tr><td class="n"></td><td><span class="p">first_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Hashed on our side.</td></tr>
+<tr><td class="n"></td><td><span class="p">last_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Hashed on our side.</td></tr>
+<tr><td class="n"></td><td><span class="p">zip</span></td><td><i class="chip opt">optional</i></td><td class="d">The lead's postal code. Used with first + last name for the Google address match.</td></tr>
+<tr><td class="n"></td><td><span class="p">wbraid</span></td><td><i class="chip opt">optional</i></td><td class="d">Google click id for web-to-app.</td></tr>
+<tr><td class="n"></td><td><span class="p">msclkid</span></td><td><i class="chip opt">optional</i></td><td class="d">Microsoft / Bing click id.</td></tr>
+<tr><td class="n"></td><td><span class="p">fbclid</span></td><td><i class="chip opt">optional</i></td><td class="d">Meta click id.</td></tr>
+<tr><td class="n"></td><td><span class="p">oppref</span></td><td><i class="chip opt">optional</i></td><td class="d">OpenAI click id.</td></tr>
+<tr><td class="n"></td><td><span class="p">utm_source</span></td><td><i class="chip opt">optional</i></td><td class="d">Also <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>. Filled from the matched lead when empty.</td></tr>
+<tr><td class="n"></td><td><span class="p">campaignid</span></td><td><i class="chip opt">optional</i></td><td class="d">Google ValueTrack <code>{campaignid}</code>; also <code>adgroupid</code>, <code>creative</code>, <code>target</code>, <code>network</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">landing_page</span></td><td><i class="chip opt">optional</i></td><td class="d">Funnel variant that produced the lead. Filled from the matched lead when empty.</td></tr>
+<tr><td class="n"></td><td><span class="p">ip_address</span></td><td><i class="chip opt">optional</i></td><td class="d">Lead IP. URL-encode.</td></tr>
+<tr><td class="n"></td><td><span class="p">city</span></td><td><i class="chip opt">optional</i></td><td class="d">The lead's city. URL-encode.</td></tr>
+<tr><td class="n"></td><td><span class="p">user_agent</span></td><td><i class="chip opt">optional</i></td><td class="d">Browser user agent. URL-encode.</td></tr>
+<tr><td class="n"></td><td><span class="p">address</span></td><td><i class="chip opt">optional</i></td><td class="d">Street address. URL-encode.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>2 &middot; Monetize postback</h2>
+  <h3>Fire on: conversion / monetization</h3>
+  <p class="sub">endpoint: postback-monetize-webhook</p>
+
+  <div class="urlbox">
+    <div class="urlbar"><span>Header</span><button class="copy" data-target="h2" type="button">Copy</button></div>
+    <pre id="h2"><span class="k">x-webhook-secret:</span> &lt;secret&gt;</pre>
+  </div>
+
+  <div class="urlbox">
+    <div class="urlbar"><span>Monetize URL</span><button class="copy" data-target="u2" type="button">Copy</button></div>
+    <pre id="u2">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-monetize-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;conversion_value=[tag:User:conversion_value]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
+  </div>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th></th><th>Parameter</th><th>Status</th><th>What it must contain</th></tr></thead>
+      <tbody>
+<tr class="grp"><td colspan="4">Call fields</td></tr>
+<tr><td class="n"></td><td><span class="p">caller_id</span></td><td><i class="chip must">must have</i></td><td class="d">Caller's own phone in E.164, e.g. <code>+15551234567</code> &mdash; the number they call from, not the number they dialled.</td></tr>
+<tr><td class="n"></td><td><span class="p">caliber_call_id</span></td><td><i class="chip must">must have</i></td><td class="d">The Caliber call id &mdash; the same id you sent on the transfer postback for this call. A re-fire of the same call is ignored.</td></tr>
+<tr><td class="n"></td><td><span class="p">call_id</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools call id &mdash; the same id you sent on the transfer postback for this call. Not the Caliber call id.</td></tr>
+<tr><td class="n"></td><td><span class="p">publisher</span></td><td><i class="chip must">must have</i></td><td class="d">Hard-coded <b>NBA</b>. Any other value is rejected (HTTP 422).</td></tr>
+<tr><td class="n"></td><td><span class="p">ib_source</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools route name of the number called, e.g. <code>Thank You Page</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">cv_source</span></td><td><i class="chip req">required</i></td><td class="d">Hard-coded <b>caliber</b>.</td></tr>
+<tr><td class="n"></td><td><span class="p">offer</span></td><td><i class="chip req">required</i></td><td class="d">The campaign or offer, pulled from the call &mdash; not hard-coded. Example values: <code>CPN_ENE</code>, <code>CPN_ACA</code>, <code>CPN_EDU</code>, <code>CPN_MED</code>. Hard-code it only if the value is not available. Tell the NBA team if your values differ.</td></tr>
+<tr><td class="n"></td><td><span class="p">conversion_time</span></td><td><i class="chip req">required</i></td><td class="d">The time this call converted; the call end time is next best, and transfer time next after that. From the current call, never a prior one. ISO-8601 UTC preferred.</td></tr>
+<tr><td class="n"></td><td><span class="p">conversion_value</span></td><td><i class="chip req">required</i></td><td class="d">Revenue for the call as a decimal, e.g. <code>42.50</code>. A value of <code>0</code> cannot be uploaded to Google Ads.</td></tr>
+<tr><td class="n"></td><td><span class="p">queue</span></td><td><i class="chip opt">optional</i></td><td class="d">Queue name or id.</td></tr>
+<tr><td class="n"></td><td><span class="p">agent_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Agent who handled the call.</td></tr>
+<tr class="grp"><td colspan="4">Lead fields</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. For traffic from other sources, replace <code>gclid</code> and <code>gbraid</code> with that source's click id parameter, e.g. <code>msclkid</code> or <code>fbclid</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">transaction_id</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Our lead id: created in Supabase when the form is submitted and passed to CallTools and Caliber with the lead. Not a Caliber or CallTools transaction or lead id.</td></tr>
+<tr><td class="n"></td><td><span class="p">gclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id.</td></tr>
+<tr><td class="n"></td><td><span class="p">gbraid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id for iOS app-to-web.</td></tr>
+<tr><td class="n"></td><td><span class="p">email</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Hashed on our side. The strongest identifier for matching a call to a click.</td></tr>
+<tr><td class="n"></td><td><span class="p">state</span></td><td><i class="chip lead">required if lead</i></td><td class="d">The state the caller provided &mdash; not the state of the caller id.</td></tr>
+<tr class="grp"><td colspan="4">Additional lead fields</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Same list as the transfer postback. Add any you have.</td></tr>
+<tr><td class="n"></td><td><span class="p">first_name, last_name, zip</span></td><td><i class="chip opt">optional</i></td><td class="d">Hashed on our side; used together for the Google address match.</td></tr>
+<tr><td class="n"></td><td><span class="p">wbraid, msclkid, fbclid, oppref</span></td><td><i class="chip opt">optional</i></td><td class="d">Other click ids: Google web-to-app, Microsoft, Meta, OpenAI.</td></tr>
+<tr><td class="n"></td><td><span class="p">utm_*</span></td><td><i class="chip opt">optional</i></td><td class="d"><code>utm_source</code>, <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">campaignid &hellip; network</span></td><td><i class="chip opt">optional</i></td><td class="d">Google ValueTrack: <code>campaignid</code>, <code>adgroupid</code>, <code>creative</code>, <code>target</code>, <code>network</code>.</td></tr>
+<tr><td class="n"></td><td><span class="p">landing_page</span></td><td><i class="chip opt">optional</i></td><td class="d">Funnel variant that produced the lead.</td></tr>
+<tr><td class="n"></td><td><span class="p">ip_address, city, user_agent, address</span></td><td><i class="chip opt">optional</i></td><td class="d">Free text &mdash; URL-encode.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>3 &middot; Counting rules</h2>
+  <div class="callout">
+    <h3>One row per real call event</h3>
+    <p>Every transfer postback is a countable transfer, and every monetize postback is a countable conversion. Two calls from the same caller on the same day both count. We key on <code>caliber_call_id</code> only so that an accidental re-fire of the <em>same</em> call is ignored.</p>
+  </div>
+  <div class="callout">
+    <h3>Do not fire on &ldquo;no connect&rdquo;</h3>
+    <p>If the call does not connect, do not fire. As a safety net we also drop any event whose call status contains &ldquo;no connect&rdquo;.</p>
+  </div>
+</section>
+
+<section>
+  <h2>4 &middot; How to test</h2>
+  <p>Fire one of each against the URLs above with real values and the secret. Expect HTTP 200 with a body like:</p>
+  <div class="urlbox">
+    <div class="urlbar"><span>Example response</span></div>
+    <pre>{"ok":true,"event_id":"&lt;uuid&gt;","inserted":true,"status":"transfer_ready",
+ "event_type":"call_transferred","cv_source":"caliber","offer":"cpn_ene",
+ "matched_by":"transaction_id"}</pre>
+  </div>
+  <ul>
+    <li><code>HTTP 401</code> &mdash; the secret did not arrive or is wrong. Check the header name is exactly <code>x-webhook-secret</code>.</li>
+    <li><code>HTTP 422</code> &mdash; a must-have field is missing or wrong; <code>errors</code> names each one. Nothing was stored.</li>
+    <li><code>HTTP 503</code> &mdash; we could not save it. Fire it again; a repeat of a call we already saved is ignored.</li>
+    <li><code>stored:false</code> with <code>skipped</code> &mdash; a no-connect call, not stored by design.</li>
+    <li><code>inserted:false</code> &mdash; we already had this <code>caliber_call_id</code> for this event, so we treated it as a re-fire.</li>
+    <li><code>cv_source:"caliber"</code> &mdash; your <code>cv_source</code> arrived. <code>ringba</code> means it did not.</li>
+    <li><code>offer</code> &mdash; your campaign value, stored in lower case. <code>null</code> means it did not arrive.</li>
+    <li><code>event_type</code> &mdash; <code>call_transferred</code> or <code>call_converted_revenue</code>; it must match the endpoint you called.</li>
+    <li><code>matched_by</code> &mdash; how we joined to the lead: <code>transaction_id</code> is ideal, <code>caller_id</code> is the phone fallback, <code>null</code> means no lead matched.</li>
+  </ul>
+  <p>Send us the <code>caliber_call_id</code> of your first test call and we will confirm every field landed.</p>
+</section>
+
+<footer>
+  Rev 9 &mdash; caliber_call_id added and is now the must-have call id; call_id (CallTools) is required, not must-have; publisher hard-coded NBA. Rev 8 &mdash; publisher pulled per call, not hard-coded, so the NBA gate filters. Rev 7 &mdash; cv_source hard-coded; offer pulled per call; must-have and lead-field rules clarified; all offers except Internet. Rev 6 &mdash; HTTP 422 and 503 responses.
+</footer>
+
+</div>
+
+<script>
+  document.querySelectorAll("button.copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var el = document.getElementById(btn.dataset.target);
+      if (!el) return;
+      var text = el.textContent;
+      var done = function () {
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { selectOnly(el, btn); });
+      } else {
+        selectOnly(el, btn);
+      }
+    });
+  });
+  function selectOnly(el, btn) {
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      var ok = document.execCommand && document.execCommand("copy");
+      btn.textContent = ok ? "Copied" : "Selected — press Cmd/Ctrl+C";
+      setTimeout(function () { btn.textContent = "Copy"; }, 2200);
+    } catch (e) { /* leave the text selected for manual copy */ }
+  }
+</script>

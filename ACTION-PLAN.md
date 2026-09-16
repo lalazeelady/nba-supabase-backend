@@ -243,6 +243,21 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     dropped (200, `non-nba-publisher`), `cv_source`/`offer`/`event` read correctly, 0 event rows.
     The repo `ringba-*` files were synced to live first (the conversion file had comment drift).
     Caliber Postback Spec rev 5 published (same link, no secret on the page).
+  - **Rev 9 (owner, 2026-09-16), branch `caliber-call-id-required`:** the URLs add
+    `caliber_call_id` (Caliber's own call id) and hard-code `publisher=NBA`. On the postback-*
+    endpoints only, `caliber_call_id` is the must-have id: it goes in `conversion_call_id` and keys
+    the dedupe. `call_id` is now the CallTools id: it goes in `calltools_call_id` and is not
+    required. There were 0 per-call Caliber rows before the change, so no old dedupe keys conflict.
+    The Caliber order id (phone + ET day) does not change. With `publisher=NBA` hard-coded, the
+    publisher check no longer filters Caliber traffic from non-NBA campaigns.
+  - **TEST HOLD (owner, 2026-09-16), deployed v3 of both postback-* functions:** the postback-*
+    endpoints write to `public.postback_events`, NOT `offline_conversion_events`. Nothing uploads
+    that table to Google (no view, uploader, Sheet, Customer Match, rematch job or trigger reads
+    it). Why: these endpoints also receive Internet calls, which the legacy Caliber pixel already
+    uploads with a different order id, so Google would count them twice. The legacy
+    `ringba-*` endpoints and every upload path are unchanged. To go live later (owner decision):
+    set `EVENTS_TABLE` back to `offline_conversion_events` in both functions, decide how to stop
+    the Internet double count, and decide what to do with the held rows.
   - **Rev 5 contract (owner, 2026-09-15):** endpoints `postback-transfer-webhook` and
     `postback-monetize-webhook`. `event` removed from the URLs — the endpoint sets the event (the
     code still accepts `event`). The CallTools call id is sent as `call_id`, so it feeds the per-call
@@ -270,7 +285,7 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     (3) Confirm 0 requests to the old names for 7 days in the log explorer. (4) Delete
     `ringba-conversion-webhook` and `ringba-transfer-webhook` and their repo folders.
   - **Forked 2026-09-15 (owner):** the `postback-*` endpoints have a STRICT contract — HTTP 422 when
-    `publisher` is not NBA, `caller_id` has fewer than 10 digits, or `call_id` is missing; HTTP 503
+    `publisher` is not NBA, `caller_id` has fewer than 10 digits, or `caliber_call_id` is missing (rev 9; was `call_id`); HTTP 503
     when the save fails, so the sender retries. The `ringba-*` endpoints keep the lenient HTTP 200
     behaviour so Ringba and the legacy Caliber Internet pixel do not break. The lockstep rule no
     longer applies: do not copy changes between the two without review. A wrong publisher still
