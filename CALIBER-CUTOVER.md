@@ -5,7 +5,15 @@ time. Ringba and Caliber postbacks fire **simultaneously** for different
 offers throughout, and Internet has been on Caliber all along via a separate,
 older pixel that must keep behaving exactly as it does today.
 
-Spec handed to the Caliber POC: the **Caliber Postback Spec** artifact (rev 2).
+Spec handed to the Caliber POC: the **Caliber Postback Spec** artifact (rev 9; a copy is in
+`docs/caliber-postback-spec/index.html`). Since rev 9, `caliber_call_id` is the per-call id
+(stored in `conversion_call_id`) and `call_id` is the CallTools id (stored in `calltools_call_id`).
+
+> **TEST HOLD (2026-09-16):** the `postback-*` endpoints write to `public.postback_events`, which
+> nothing uploads to Google. For a test call on those endpoints, run queries 1 and 5 against
+> `postback_events` instead of `offline_conversion_events`. Query 3 does not apply: held rows
+> never pass the upload gate. The legacy `ringba-*` endpoints still write to
+> `offline_conversion_events` as before.
 It is the contract; this file is the receiving side.
 
 ---
@@ -175,7 +183,7 @@ select id, source, offer, event_type, status, publisher, conversion_value,
        conversion_call_id, caller_id, transaction_id, lead_id,
        order_id, dedupe_key, ib_source, utm_source, conversion_time
 from offline_conversion_events
-where conversion_call_id = '<caliber call_id>'
+where conversion_call_id = '<caliber_call_id>'
 order by created_at;
 ```
 
@@ -207,7 +215,7 @@ select e.id, e.source, e.offer, e.event_type, e.status,
        (x.event_id is not null) as passes_upload_gate
 from offline_conversion_events e
 left join v_offline_conversion_export x on x.event_id = e.id
-where e.conversion_call_id = '<caliber call_id>';
+where e.conversion_call_id = '<caliber_call_id>';
 ```
 
 `passes_upload_gate = false` on a row you expect to upload means the deny-list

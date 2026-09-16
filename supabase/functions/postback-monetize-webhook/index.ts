@@ -5,9 +5,13 @@
 // and the old Caliber Internet pixel. Do not copy these changes back, and review before
 // copying any ringba-conversion-webhook change here.
 //
-// Strict contract (Caliber Postback Spec rev 6):
-//   - publisher must be NBA, caller_id must have at least 10 digits, and call_id (the
-//     CallTools call id) must be present. Otherwise: HTTP 422 naming every problem.
+// Strict contract (Caliber Postback Spec rev 9):
+//   - publisher must be NBA, caller_id must have at least 10 digits, and caliber_call_id (the
+//     Caliber call id) must be present. Otherwise: HTTP 422 naming every problem.
+//   - caliber_call_id is the per-call id: it goes in conversion_call_id and keys the dedupe.
+//     call_id (the CallTools call id) is stored in calltools_call_id and is NOT required.
+//     Here `call_id` is the CallTools id, so it is NOT an alias of conversion_call_id, which is
+//     different from the ringba-* endpoints.
 //   - A failed save answers HTTP 503 so the sender retries. A retry of a call we already
 //     saved is a no-op (dedupe_key), so a retry is safe.
 //   - The "always returns 200" notes in the original header below no longer apply.
@@ -106,16 +110,23 @@ function normalizeOffer(raw: string | null): string | null {
   return KNOWN_OFFERS.includes(v) ? v : v.slice(0, 40);
 }
 
+// TEST HOLD (owner, 2026-09-16): rows from this endpoint go to public.postback_events, which
+// nothing uploads to Google, not to offline_conversion_events. This endpoint also receives
+// Internet calls, which the legacy Caliber pixel already uploads, so live rows here would count
+// twice. To go live: set this back to "offline_conversion_events" (after an owner decision).
+const EVENTS_TABLE = "postback_events";
+
 // Field-name variants we accept. First non-empty value wins. `conversion_call_id` holds the
-// call id of the CONVERTED call: Ringba (RGB…), Caliber (`call_id`), or CallTools interim id.
+// call id of the CONVERTED call: Caliber (`caliber_call_id`), Ringba (RGB…), or another platform's id.
 const FIELD_VARIANTS = {
   conversion_call_id: [
-    "conversion_call_id",
-    "ringba_call_id", "call_id", "callId", "callid",
+    "caliber_call_id", "caliberCallId",
+    "conversion_call_id", "ringba_call_id",
     "inboundCallId", "inbound_call_id", "uuid",
   ],
   calltools_call_id: [
-    "calltools_call_id", "ct_call_id", "source_call_id",
+    "calltools_call_id", "call_id", "callId", "callid",
+    "ct_call_id", "source_call_id",
   ],
   caller_id: [
     "caller_id", "callerId", "callerid", "caller",
@@ -606,7 +617,7 @@ Deno.serve(async (req: Request) => {
     contractErrors.push({ field: "caller_id", problem: "missing or fewer than 10 digits", received: caller_id || null });
   }
   if (!conversion_call_id) {
-    contractErrors.push({ field: "call_id", problem: "missing: send the CallTools call id" });
+    contractErrors.push({ field: "caliber_call_id", problem: "missing: send the Caliber call id" });
   }
   if (contractErrors.length > 0) {
     await supabase.from("api_logs").insert({
@@ -733,7 +744,7 @@ Deno.serve(async (req: Request) => {
   // Upsert by dedupe_key. ignoreDuplicates so a re-fired Ringba postback is
   // a no-op rather than a status reset (which would re-upload to Google).
   const { data: existing } = await supabase
-    .from("offline_conversion_events")
+    .from(EVENTS_TABLE)
     .select("id, status")
     .eq("dedupe_key", dedupe_key)
     .maybeSingle();
@@ -746,7 +757,7 @@ Deno.serve(async (req: Request) => {
     inserted = false;
   } else {
     const { data: newRow, error: insertErr } = await supabase
-      .from("offline_conversion_events")
+      .from(EVENTS_TABLE)
       .insert({
         source,
         event_type: EVENT_TYPE,
@@ -802,7 +813,7 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (insertErr) {
-      console.error("offline_conversion_events insert error:", insertErr);
+      console.error(`${EVENTS_TABLE} insert error:`, insertErr);
       // Log the failure, then answer 503 so the sender retries (strict contract).
       await supabase.from("api_logs").insert({
         lead_id: match.lead_id,
