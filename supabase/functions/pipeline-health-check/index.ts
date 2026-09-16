@@ -86,6 +86,8 @@ const FAILURE_MIN = 10;          // floor: ignore a trickle of naturally-unmatch
 const FAILURE_RATE = 0.20;       // ...and only alert when this share of attempts failed
 const PUBLISHER_DROP_WINDOW_H = 3;   // look back this far for publisher-gate drops
 const PUBLISHER_DROP_MIN = 5;        // ignore a trickle of genuine other-publisher traffic
+const SAVE_FAIL_WINDOW_H = 1;        // look back this far for saves that failed
+const SAVE_FAIL_MIN = 1;             // a single lost lead or postback is worth an email
 const CM_GRACE_H = 48;           // the CM cron is DAILY, so 48h = two missed runs
 const CM_BACKLOG_THRESHOLD = 100;// ignore a small queue between daily runs
 const ALERT_TO = "larazielin1@gmail.com";
@@ -339,6 +341,43 @@ async function publisherDrops(
   return { count: rows.length, values: [...values].slice(0, 10) };
 }
 
+// 5. FAILED SAVES — a lead or a postback that could not be written at all.
+//
+// The 9/11 and 9/14 outages lost 120 leads and 62 postbacks with no alert: the
+// webhooks answered 200 and submit-lead answered 500, and the only trace was in the
+// function logs. Both now leave an api_logs row (webhooks: success=false with
+// "insert failed"; submit-lead: api_type='lead-save-failed'), and this probe turns
+// those rows into an email within the hour.
+//
+// Reads api_logs by created_at — index api_logs_created_at_brin_idx keeps that cheap
+// on an 847 MB table. Returns null if the probe itself fails, like the other probes.
+async function failedSaves(
+  supabase: ReturnType<typeof createClient>,
+  sinceIso: string,
+): Promise<{ count: number; kinds: string[] } | null> {
+  const { data, error } = await supabase
+    .from("api_logs")
+    .select("api_type, error_message")
+    .gte("created_at", sinceIso)
+    .eq("success", false)
+    .limit(500);
+  if (error) {
+    console.error("failed-save probe failed:", error.message);
+    return null;
+  }
+  const rows = (data ?? []) as Array<{ api_type: string | null; error_message: string | null }>;
+  // success=false also covers CRM rejections (lead-to-ct / lead-to-caliber), which are
+  // a different problem with their own email. Count only rows that mean "we could not
+  // store it".
+  const saves = rows.filter((r) =>
+    (r.api_type ?? "") === "lead-save-failed" ||
+    /insert failed/i.test(r.error_message ?? "")
+  );
+  const kinds = new Set<string>();
+  for (const r of saves) kinds.add(r.api_type ?? "webhook-insert");
+  return { count: saves.length, kinds: [...kinds].slice(0, 6) };
+}
+
 async function lastUploadSuccess(
   supabase: ReturnType<typeof createClient>,
 ): Promise<string | null> {
@@ -376,11 +415,13 @@ Deno.serve(async (req: Request) => {
     const config = auditConfig();
     const dropWindowIso = new Date(now - PUBLISHER_DROP_WINDOW_H * 3600000).toISOString();
     const cmConfig = auditCustomerMatch();
-    const [backlog, lastUpload, failures, drops, cmBacklog] = await Promise.all([
+    const saveWindowIso = new Date(now - SAVE_FAIL_WINDOW_H * 3600000).toISOString();
+    const [backlog, lastUpload, failures, drops, saves, cmBacklog] = await Promise.all([
       apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
       failureStats(supabase),
       publisherDrops(supabase, dropWindowIso),
+      failedSaves(supabase, saveWindowIso),
       // Probed only when the audience pipeline is live. While it is off this stays
       // null-by-choice and contributes nothing to `problems` or `alert`.
       cmConfig.enabled ? customerMatchBacklog(supabase) : Promise.resolve([]),
@@ -445,6 +486,23 @@ Deno.serve(async (req: Request) => {
     }
     const publisherDropping = drops !== null && drops.count >= PUBLISHER_DROP_MIN;
 
+    // Failed saves: a lead or postback that never reached the database. Unlike every
+    // other check here this is about INGESTION, not delivery to Google.
+    if (saves === null) {
+      problems.push(
+        "Failed-save probe failed — cannot tell whether leads or postbacks are failing to " +
+        "save. This is the check that covers the 9/11 and 9/14 loss pattern.",
+      );
+    } else if (saves.count >= SAVE_FAIL_MIN) {
+      problems.push(
+        `${saves.count} lead(s)/postback(s) FAILED TO SAVE in the last ${SAVE_FAIL_WINDOW_H}h ` +
+        `(${saves.kinds.join(", ")}). These are lost unless the sender retries: the webhooks ` +
+        "answer 5xx only on the postback-* endpoints, and submit-lead answers 500 to the funnel " +
+        "while the visitor still sees the thank-you page. Check the database health first.",
+      );
+    }
+    const savesFailing = saves !== null && saves.count >= SAVE_FAIL_MIN;
+
     // ---- Customer Match (independent, silent while disabled) ----------------
     // Appended AFTER the offline-conversion problems so the existing report reads
     // identically when the audience pipeline is off.
@@ -482,6 +540,9 @@ Deno.serve(async (req: Request) => {
             dropping: publisherDropping,
           },
       api: { backlog, last_success: lastUpload, stalled },
+      saves: saves === null
+        ? { probe: "failed" }
+        : { window_hours: SAVE_FAIL_WINDOW_H, failed: saves.count, kinds: saves.kinds },
       delivery: failures === null ? { probe: "failed" } : {
         window_hours: FAILURE_WINDOW_H,
         failed: failures.failed,
@@ -505,6 +566,8 @@ Deno.serve(async (req: Request) => {
         age_days: AGE_DAYS,
         failure_window_h: FAILURE_WINDOW_H,
         failure_min: FAILURE_MIN,
+        save_fail_window_h: SAVE_FAIL_WINDOW_H,
+        save_fail_min: SAVE_FAIL_MIN,
         failure_rate: FAILURE_RATE,
         cm_grace_h: CM_GRACE_H,
         cm_backlog_threshold: CM_BACKLOG_THRESHOLD,
@@ -512,7 +575,8 @@ Deno.serve(async (req: Request) => {
     };
 
     const alert = stalled || rejecting || backlogUnknown || failures === null ||
-      publisherDropping || drops === null || !config.ok || cmAlert;
+      publisherDropping || drops === null || savesFailing || saves === null ||
+      !config.ok || cmAlert;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
@@ -521,6 +585,7 @@ Deno.serve(async (req: Request) => {
         if (rejecting) parts.push("Google REJECTING uploads");
         if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
         if (publisherDropping) parts.push("PUBLISHER-GATE DROPS");
+        if (savesFailing) parts.push("FAILED SAVES");
         if (!config.ok) parts.push("MISCONFIGURED");
         if (cmAlert) parts.push("CUSTOMER MATCH");
         const subject = force && !alert

@@ -172,11 +172,17 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     in the 3–8am ET window. It puts the same limit in the function and points the cron job
     back at the function. Branch `fix-rematch-job-scope`. Until then the function itself is
     still the unlimited version — do not call it by hand.
-- [ ] **P2.2 Fix the health check's full scan of `api_logs`** · Claude
+- [~] **P2.2 Fix the health check's full scan of `api_logs`** · Claude · **built 2026-09-15, not applied**
   - Why: the publisher-drop probe reads all 847 MB every hour — **17% of disk reads**.
   - Option A (no DDL): the webhooks write `api_type = 'publisher-drop'` on those log
     rows, and the health check filters on `api_type` (a partial index exists).
   - Option B: `CREATE INDEX CONCURRENTLY` on `api_logs(created_at)`.
+  - **Chosen: Option B, as a BRIN index** —
+    `supabase/migrations/20260916071000_api_logs_created_at_brin_index.sql` (branch
+    `failed-save-alerts`). api_logs is append-only, so BRIN is a few dozen KB and builds in
+    seconds, where a btree would be ~50 MB. It serves the publisher-drop probe and the new
+    failed-save probe. **Apply with `execute_sql`, not `apply_migration`** — `create index
+    concurrently` cannot run inside a transaction. Quiet window 3-8am ET.
 - [ ] **P2.3 Add an index on `leads(created_at)`** · Claude · DDL, CONCURRENTLY
   - Why: every date-filtered query scans all 160k leads.
 - [ ] **P2.4 Re-enable the Customer Match rollup (job 12)** · Claude
@@ -204,7 +210,7 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     2. Claude: confirm in the logs that calls stop. Then delete the
        `ringba-conversion-webhook-test` function and the `offline_conversion_test` table
        (the table drop is DDL — quiet window).
-- [ ] **P3.2 Stop silent save failures** · Claude (Part A) · You ask vendors (Part B)
+- [~] **P3.2 Stop silent save failures** · Claude (Part A) · You ask vendors (Part B) · **Part A built 2026-09-15, not deployed**
   - Why: when a save fails, the webhooks still answer HTTP 200, so the sender never
     retries (62 postbacks lost on 9/11). The failure is visible only in function logs —
     the health check watches uploads, not failed saves.
@@ -212,6 +218,22 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     to save. Small change, no DDL.
   - Part B — retries (nice to have): ask Ringba, Caliber and CallTools whether they retry
     pixels that get a non-2xx response. If yes, return 5xx on a failed save.
+  - **Part A, built on branch `failed-save-alerts` (owner approved 2026-09-15):**
+    1. `submit-lead` writes an `api_logs` row (`api_type='lead-save-failed'`) when the leads
+       insert fails; today it only prints to the function log. Best-effort and wrapped, so a
+       logging failure cannot change the response. Also removes a dead `hmacSha256Hex` helper
+       that exists in the repo but not in deployed v63.
+    2. `pipeline-health-check` gains a failed-save probe over the last hour (webhook
+       "insert failed" rows + `lead-save-failed`) wired into problems, report and email.
+       Threshold is 1: a single lost lead is worth an email.
+    3. `uptime-ping` (new function, `verify_jwt=false`): a public 200/503 endpoint doing one
+       small read and returning no data — the only check that can see a FULL outage, because
+       on 9/14 the health-check cron itself could not start.
+    4. **You:** point a free uptime monitor (UptimeRobot, Better Stack, ...) at
+       `https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/uptime-ping`, GET, every 5 min,
+       alert on any non-200. Do this after the function is deployed.
+  - Deploy plan: all three functions plus the P2.2 index in the same 3-8am ET window, then
+    verify a lead saves and the health check reports `saves: {failed: 0}`.
 - [~] **P3.3 Move every postback pixel to the platform-neutral names, then retire the old ones** · You (vendors), then Claude
   - **Done 2026-09-15:** `postback-monetize-webhook` (owner renamed it the same day from
     `postback-conversion-webhook`, which is now an orphan with 0 senders) and `postback-transfer-webhook` deployed
