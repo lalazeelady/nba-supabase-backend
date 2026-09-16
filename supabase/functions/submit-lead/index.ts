@@ -14,20 +14,6 @@ const corsHeaders = {
 // key are loaded from edge-function env (never the browser).
 const CALIBER_URL = "https://dblgxzhlxcviknamnskj.supabase.co/functions/v1/ingest/nba";
 
-async function hmacSha256Hex(secret: string, data: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
-  return Array.from(new Uint8Array(sigBuf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 // Map our 4 income buckets to Caliber's 6. Best-effort — both spans are
 // approximate so we pick the bucket that contains the midpoint of ours.
 function mapAnnualIncomeToCaliber(ours: string | null | undefined): string | undefined {
@@ -582,6 +568,26 @@ Deno.serve(async (req: Request) => {
 
     if (insertError) {
       console.error("Supabase insert error:", insertError);
+      // Leave a row the hourly health check can see (P3.2 Part A). Until 2026-09-15 a
+      // failed lead insert was visible only in the function logs, which is why the
+      // 9/11 and 9/14 losses alerted nobody. Best-effort on purpose: when the database
+      // is fully down this insert fails too — that case is covered by the external
+      // uptime monitor watching the uptime-ping function, not by this row.
+      try {
+        await supabase.from("api_logs").insert({
+          api_type: "lead-save-failed",
+          lead_id: null,
+          transaction_id: transactionId,
+          caller_id: payload.phone || "",
+          request_payload: { source: "submit-lead", stage: "leads-insert" } as object,
+          response_payload: { error: insertError.message } as object,
+          http_status: 500,
+          success: false,
+          error_message: `submit-lead: leads insert failed: ${insertError.message}`,
+        });
+      } catch (logErr) {
+        console.error("Failed to log the lead-save failure:", logErr);
+      }
       return new Response(
         JSON.stringify({ error: "Failed to save lead" }),
         {
