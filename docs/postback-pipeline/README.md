@@ -63,6 +63,11 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
   twice: CallConvertOffline (revenue) and CallXfer ($0). Other offers send transfer postbacks.
 - Matching unknown-source calls to leads in other ways was tested on 2026-09-17 (221 calls,
   $1,425): case-insensitive email recovered 0, legacy phone data recovered 7 ($45). Not added.
+- **Unknown** = no click id (its own or from a matched lead), no usable `utm_source`, and no
+  mapped route name: only call data. These never upload; an unknown call can come from any
+  source, including Meta. Revisit when Caliber sends `ib_source` on every postback.
+- **Meta** (`apply.nationalbenefitalliance.com`) is another entity's ads and lander. Its leads
+  reach us through the call platform, but we do nothing with them.
 
 ## Upload safety
 
@@ -113,10 +118,10 @@ select * from v_call_through_daily where lead_date_et = date '2026-09-17';
 
 | Field | Filled | Why we need it |
 |---|---:|---|
-| `call_id` (CallTools call id) | **0%** | The only way to tell a real call-back from one call counted twice, and the key a proper dedupe would use. Caliber is adding it. |
+| `call_id` (CallTools call id) | **0%** | The dedupe key (`call_key`). Until it arrives, dedupe falls back to phone + day, which cannot tell a real call-back from one call counted twice. Caliber is adding it. |
 | `ib_source` | 35% | Platform attribution when the call has no click id. Needed on every postback. |
 | `transaction_id` (our lead id) | 63% | The strongest lead match. Needed whenever a lead exists. |
-| `msclkid` | **0%** | Bing uploads need the Microsoft click id; without it a Bing call can only match on hashed email/phone. Same for `fbclid` (Meta) and `oppref` (OpenAI). |
+| `msclkid` | **0%** | **The postback URL has no msclkid parameter**, so Bing calls come back with no click id: of 93 matched calls whose lead has an msclkid, Caliber returned 0. The leads are fine (98.5% of Bing leads carry it) — add `&msclkid=`, `&fbclid=` and `&oppref=` to both URLs. We recover it from the matched lead meanwhile. |
 | `utm_source` | **0%** | Second attribution signal after the click id. Today attribution falls back to the route name only. |
 | `first_name`, `last_name`, `zip` | 0% | 34% of calls match no lead. With name + zip, Google can still match those calls on the hashed address block. |
 | `status` (call status) | **0%** | We drop "no connect" events. Today we rely on Caliber never sending them. |
@@ -130,14 +135,24 @@ Also confirm with Caliber:
 - **Send the secret in the `x-webhook-secret` header**, not in the URL. In the URL it is written to
   the edge logs.
 
-## Parked: repeat calls and dedupe (owner, 2026-09-17)
+## Dedupe (business decision, 2026-09-17)
 
-`postbacks` keeps every call Caliber sends. 102 callers produced 124 repeat conversions on
-2026-09-17 (15 of them under 2 minutes apart). Whether a repeat is a real call-back or one call
-counted twice **cannot be decided without the CallTools call id**, which is 0% filled today.
-Uploads stay in validate_only, so nothing reaches Google meanwhile. When the CallTools call id
-arrives and the owner decides, dedupe becomes one isolated change: a rule keyed on
-`calltools_call_id`. Nothing else in the pipeline needs to change.
+**At the upload only.** `postbacks` keeps every event Caliber sends, so a report can show
+received vs uploaded vs dropped-as-duplicate, and revenue can be reconciled against Caliber.
+
+- **Key** = `postbacks.call_key`: `calltools_call_id` when Caliber sends it (one inbound call),
+  else the caller's phone + the Eastern-time day (what the legacy pipeline used).
+- **Scope** = per conversion action. One caller with 3 calls in a day uploads 1 monetize and
+  1 transfer conversion. A transfer and a monetize event for the same call still both upload,
+  because they go to different Google actions.
+- The **earliest** event for a `call_key` keeps the upload; later ones are queued as
+  `skipped / duplicate_call` and stay visible in `v_recon_daily`.
+- The phone + day fallback cannot tell a real call-back from one call counted twice. Once
+  `calltools_call_id` arrives on every postback, the key becomes exact with no code change.
+
+Effect on 2026-09-17 (Internet, by 2pm ET): 774 monetized events received ($5,119) → 605
+distinct calls; 114 dropped as duplicates ($753); 289 skipped as unknown-source ($1,946);
+371 would upload ($2,420).
 
 ## Health alerts (on since 2026-09-17, in the hourly `pipeline-health-check` email)
 
