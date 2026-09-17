@@ -9,11 +9,10 @@ Spec handed to the Caliber POC: the **Caliber Postback Spec** artifact (rev 9; a
 `docs/caliber-postback-spec/index.html`). Since rev 9, `caliber_call_id` is the per-call id
 (stored in `conversion_call_id`) and `call_id` is the CallTools id (stored in `calltools_call_id`).
 
-> **TEST HOLD (2026-09-16):** the `postback-*` endpoints write to `public.postback_events`, which
-> nothing uploads to Google. For a test call on those endpoints, run queries 1 and 5 against
-> `postback_events` instead of `offline_conversion_events`. Query 3 does not apply: held rows
-> never pass the upload gate. The legacy `ringba-*` endpoints still write to
-> `offline_conversion_events` as before.
+> **Since 2026-09-17:** the `postback-*` endpoints write to `public.postbacks` (the new pipeline,
+> see `docs/postback-pipeline/README.md`). Look a test call up with
+> `select * from v_postbacks where caliber_call_id = '…'`. Nothing from that table uploads to
+> Google yet (validate_only). Queries 1–6 below apply to the legacy `ringba-*` path only.
 It is the contract; this file is the receiving side.
 
 ---
