@@ -109,6 +109,36 @@ select u.platform, u.status, u.skip_reason, u.last_result
 select * from v_call_through_daily where lead_date_et = date '2026-09-17';
 ```
 
+## Ask Caliber for (fill rate on 916 postbacks, 2026-09-16/17)
+
+| Field | Filled | Why we need it |
+|---|---:|---|
+| `call_id` (CallTools call id) | **0%** | The only way to tell a real call-back from one call counted twice, and the key a proper dedupe would use. Caliber is adding it. |
+| `ib_source` | 35% | Platform attribution when the call has no click id. Needed on every postback. |
+| `transaction_id` (our lead id) | 63% | The strongest lead match. Needed whenever a lead exists. |
+| `msclkid` | **0%** | Bing uploads need the Microsoft click id; without it a Bing call can only match on hashed email/phone. Same for `fbclid` (Meta) and `oppref` (OpenAI). |
+| `utm_source` | **0%** | Second attribution signal after the click id. Today attribution falls back to the route name only. |
+| `first_name`, `last_name`, `zip` | 0% | 34% of calls match no lead. With name + zip, Google can still match those calls on the hashed address block. |
+| `status` (call status) | **0%** | We drop "no connect" events. Today we rely on Caliber never sending them. |
+
+Also confirm with Caliber:
+- **Can one call ever be monetized twice** (two buyers, or a second sale on the same call)? Our key
+  is `(caliber_call_id, event_type)`, so a second monetize event for the same call would be treated
+  as a re-fire and dropped. If it can happen, we need a per-conversion id from them.
+- **Transfer postbacks for the non-Internet offers** (Internet counts transfers from the monetized
+  postback).
+- **Send the secret in the `x-webhook-secret` header**, not in the URL. In the URL it is written to
+  the edge logs.
+
+## Parked: repeat calls and dedupe (owner, 2026-09-17)
+
+`postbacks` keeps every call Caliber sends. 102 callers produced 124 repeat conversions on
+2026-09-17 (15 of them under 2 minutes apart). Whether a repeat is a real call-back or one call
+counted twice **cannot be decided without the CallTools call id**, which is 0% filled today.
+Uploads stay in validate_only, so nothing reaches Google meanwhile. When the CallTools call id
+arrives and the owner decides, dedupe becomes one isolated change: a rule keyed on
+`calltools_call_id`. Nothing else in the pipeline needs to change.
+
 ## Health alerts (on since 2026-09-17, in the hourly `pipeline-health-check` email)
 
 - No monetize postbacks for 2 hours, weekdays 10am–8pm ET.

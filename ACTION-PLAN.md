@@ -183,8 +183,8 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     seconds, where a btree would be ~50 MB. It serves the publisher-drop probe and the new
     failed-save probe. **Apply with `execute_sql`, not `apply_migration`** — `create index
     concurrently` cannot run inside a transaction. Quiet window 3-8am ET.
-- [ ] **P2.3 Add an index on `leads(created_at)`** · Claude · DDL, CONCURRENTLY
-  - Why: every date-filtered query scans all 160k leads.
+- [x] **P2.3 Add an index on `leads(created_at)`** · done 2026-09-17 (`leads_created_at_idx`,
+  CONCURRENTLY, with the postback pipeline).
 - [ ] **P2.4 Re-enable the Customer Match rollup (job 12)** · Claude
   - Do: `cron.alter_job((select jobid from cron.job where jobname = 'customer-match-refresh-daily'), active := true)`.
   - Why it's off: until it runs, no **new** monetized callers join the audience.
@@ -397,7 +397,8 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 
 - [ ] **P8.1 Backend PR #14 `field-parity-audit`** (docs, open since 2026-09-05) · merge or close
 - [ ] **P8.2 nba3 PR #39 `field-parity-audit`** (docs, open since 2026-09-05) · merge or close
-- [ ] **P8.3 Delete the backend branch `gads-customer-match-datamanager-api`** · Claude
+- [x] **P8.3 Delete the backend branch `gads-customer-match-datamanager-api`** · done 2026-09-16
+  with the other 5 merged branches; PR #14 closed. · Claude
   - It is squash-merged as `8942b6a`.
 - [ ] **P8.4 Review 8 nba3 branches that aren't merged into `main`** · Claude lists, You decide
   - `apply4-conform-ub-styling`, `docs-claudemd-dualcrm-sync`, `docs-funnel-playbook`,
@@ -432,8 +433,15 @@ Design, objects, look-ups and rollback: `docs/postback-pipeline/README.md`.
   Same contract for Caliber. Secret removed from stored payloads; slim `api_logs` rows.
 - [x] **P10.3 Upload queue + uploader** · `platform_uploads`, `queue_platform_uploads()`,
   `upload-platform-conversions` v1. Google validate_only, Bing dry run. No cron.
-- [ ] **P10.4 Owner decisions** · Google rule for unknown-source calls; repeat calls per caller
-  per day; enable alerts from `postback_health()`.
+- [x] **P10.4 Owner decisions (2026-09-17)** · No unknown-source uploads. No dedupe beyond an
+  identical re-fire. Internet transfers counted from monetized postbacks. Health alerts on.
+  Lead match limited to leads from the 90 days before the call.
+- [ ] **P10.8 PARKED: repeat calls / dedupe** · Needs the CallTools call id (0% filled today) and
+  an owner decision. Until then uploads stay validate_only. See `docs/postback-pipeline/README.md`.
+- [ ] **P10.9 Ask Caliber for the missing fields** · call_id, ib_source on every postback,
+  transaction_id whenever a lead exists, msclkid / fbclid / oppref, utm_source, first/last/zip,
+  call status; confirm whether one call can be monetized twice; secret in the header. Table with
+  fill rates in `docs/postback-pipeline/README.md`.
 - [ ] **P10.5 Bing live** · Microsoft Ads API access; stop manual uploads; build the send.
 - [ ] **P10.6 Go live per offer** · stop the legacy upload for the offer, then
   `GOOGLE_POSTBACK_LIVE_OFFERS` + `GOOGLE_POSTBACK_UPLOAD_MODE=live` + uploader cron.
