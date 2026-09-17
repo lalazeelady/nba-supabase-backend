@@ -142,9 +142,11 @@ received vs uploaded vs dropped-as-duplicate, and revenue can be reconciled agai
 
 - **Key** = `postbacks.call_key`: `calltools_call_id` when Caliber sends it (one inbound call),
   else the caller's phone + the Eastern-time day (what the legacy pipeline used).
-- **Scope** = per conversion action. One caller with 3 calls in a day uploads 1 monetize and
-  1 transfer conversion. A transfer and a monetize event for the same call still both upload,
-  because they go to different Google actions.
+- **Scope** = per offer and per conversion action. One caller with 3 Internet calls in a day
+  uploads 1 monetize and 1 transfer conversion. The same caller monetizing Internet **and**
+  Energy on the same day uploads **both**: dedupe only removes a repeat of the same offer.
+  A transfer and a monetize event for the same call also both upload, because they go to
+  different Google actions.
 - The **earliest** event for a `call_key` keeps the upload; later ones are queued as
   `skipped / duplicate_call` and stay visible in `v_recon_daily`.
 - The phone + day fallback cannot tell a real call-back from one call counted twice. Once
