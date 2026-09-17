@@ -201,7 +201,10 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 
 ## Phase 3 — Webhook reliability and the CallTools test pixel
 
-- [ ] **P3.1 Retire the CallTools test pixel and its test sink** · You, then Claude · cleanup
+- [~] **P3.1 Retire the CallTools test pixel and its test sink** · **owner removed the pixel 2026-09-17**
+  (last call 6:26pm ET, silent since). `offline_conversion_test` dropped (13,871 rows, never
+  uploaded). **Still to do:** delete the `ringba-conversion-webhook-test` function itself —
+  Supabase dashboard, or `supabase functions delete ringba-conversion-webhook-test`.
   - Owner, 2026-09-14: **not a revenue gap.** The pixel was set up either for the
     CallTools-side internet upload process or to test the retired Google Ads action
     `Test_DataMgrAPIUpload`.
