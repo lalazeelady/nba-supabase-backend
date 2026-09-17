@@ -15,9 +15,9 @@ Started 2026-09-14. This file is the **single source of truth** for open work.
 **ASAP — prevents a repeat of 9/11**
 1. ~~P1.4 Upgrade compute to Small~~ — **done 2026-09-14 9:01pm ET**, during the outage (`docs/pipeline-incident-2026-09-14/`)
 2. P2.1 Fix the rematch job — **now more urgent:** it hit its 2-minute timeout on most runs on 9/14. Job 11 is paused until this fix.
-3. P2.2 Fix the health check's full scan of `api_logs`
+3. ~~P2.2 Fix the health check's full scan of `api_logs`~~ — **done 2026-09-16 9:08pm ET**
 4. P5.1 Close the public PII exposure
-5. P3.2 Part A — alert when a lead or postback fails to save *(Claude recommends; owner to confirm)*
+5. ~~P3.2 Part A — alert when a lead or postback fails to save~~ — **deployed 2026-09-16 7:54pm ET** (owner: set up the external uptime monitor)
 
 **Finish what is already in progress** — not prevention, but required
 - P1.1–P1.3 Recovery scan, replay (deadline 2026-12-05), Customer Match upload check
@@ -172,7 +172,10 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     in the 3–8am ET window. It puts the same limit in the function and points the cron job
     back at the function. Branch `fix-rematch-job-scope`. Until then the function itself is
     still the unlimited version — do not call it by hand.
-- [~] **P2.2 Fix the health check's full scan of `api_logs`** · Claude · **built 2026-09-15, not applied**
+- [x] **P2.2 Fix the health check's full scan of `api_logs`** · Claude · **done 2026-09-16 9:08pm ET**
+  - **Applied (owner approved after-hours, after 9pm ET):** `api_logs_created_at_brin_idx` built with
+    `create index concurrently` through `execute_sql`. Valid (`indisvalid = true`), 88 kB. `EXPLAIN`
+    of a 1-hour `created_at` read shows a Bitmap Index Scan on the index.
   - Why: the publisher-drop probe reads all 847 MB every hour — **17% of disk reads**.
   - Option A (no DDL): the webhooks write `api_type = 'publisher-drop'` on those log
     rows, and the health check filters on `api_type` (a partial index exists).
@@ -210,7 +213,14 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     2. Claude: confirm in the logs that calls stop. Then delete the
        `ringba-conversion-webhook-test` function and the `offline_conversion_test` table
        (the table drop is DDL — quiet window).
-- [~] **P3.2 Stop silent save failures** · Claude (Part A) · You ask vendors (Part B) · **Part A built 2026-09-15, not deployed**
+- [~] **P3.2 Stop silent save failures** · Claude (Part A) · You ask vendors (Part B) · **Part A deployed 2026-09-16**
+  - **Deployed 2026-09-16 7:54pm ET (owner approved):** `submit-lead` v64, `pipeline-health-check` v11,
+    `uptime-ping` v1 (`verify_jwt=false`), all from `main`. Before the deploy, live `submit-lead` v63 and
+    `pipeline-health-check` v10 matched the repo base. Checked: `uptime-ping` returns 200; 48 of 48 leads
+    in the next 35 min reached CallTools and Caliber (0 failed, 0 pending), same as the hour before;
+    0 `lead-save-failed` rows; the 8:20pm health-check run returned `ok:true`, `alert:false`,
+    `saves: {failed: 0}`. Legacy Caliber Internet and Ringba rows still arrive.
+  - **Still open (owner):** step 4 below, the external uptime monitor. Part B (vendor retries).
   - Why: when a save fails, the webhooks still answer HTTP 200, so the sender never
     retries (62 postbacks lost on 9/11). The failure is visible only in function logs —
     the health check watches uploads, not failed saves.
@@ -232,8 +242,7 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     4. **You:** point a free uptime monitor (UptimeRobot, Better Stack, ...) at
        `https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/uptime-ping`, GET, every 5 min,
        alert on any non-200. Do this after the function is deployed.
-  - Deploy plan: all three functions plus the P2.2 index in the same 3-8am ET window, then
-    verify a lead saves and the health check reports `saves: {failed: 0}`.
+  - Deploy plan (done 2026-09-16): the three functions in the evening, the P2.2 index after 9pm ET.
 - [~] **P3.3 Move every postback pixel to the platform-neutral names, then retire the old ones** · You (vendors), then Claude
   - **Done 2026-09-15:** `postback-monetize-webhook` (owner renamed it the same day from
     `postback-conversion-webhook`, which is now an orphan with 0 senders) and `postback-transfer-webhook` deployed
@@ -463,16 +472,17 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 
 | Function | ID | Deployed |
 |---|---|---|
-| `submit-lead` | `fe9e14ca-9bd3-467e-a027-0ac9797e1038` | v63 |
-| `postback-monetize-webhook` | `4a1f69dd-847b-4c6e-85df-dd7a10b54735` | v1 — new name, 2026-09-15 (P3.3) |
+| `submit-lead` | `fe9e14ca-9bd3-467e-a027-0ac9797e1038` | v64 — failed-save log row (P3.2 A), 2026-09-16 |
+| `postback-monetize-webhook` | `4a1f69dd-847b-4c6e-85df-dd7a10b54735` | v3 — rev 9, writes to `postback_events` (test hold), 2026-09-16 |
 | `postback-conversion-webhook` | `192ff776-bcbf-452a-9fdb-922b81b458dc` | v1 — **orphan**, replaced by `postback-monetize-webhook` the same day; 0 senders. Delete in the dashboard (P3.3) |
-| `postback-transfer-webhook` | `ca293960-b637-451b-a1ae-91b80bdeb11b` | v1 — new name, 2026-09-15 (P3.3) |
+| `postback-transfer-webhook` | `ca293960-b637-451b-a1ae-91b80bdeb11b` | v3 — rev 9, writes to `postback_events` (test hold), 2026-09-16 |
 | `ringba-conversion-webhook` | `1556053b-fd2e-4e51-b81a-d8ff369762ad` | v47 — old name, retire after P3.3 |
 | `ringba-transfer-webhook` | `a1569e18-5995-4759-876d-720541e2e855` | v17 — old name, retire after P3.3 |
 | `upload-google-offline-conversions` | `8e25a878-1d52-4d01-a83f-476cb00f1a4e` | v43 |
 | `upload-google-customer-match` | `bfa3034a-344f-457b-9d5c-fb41f7516826` | v5 |
-| `pipeline-health-check` | `8a6a1519-187f-4bb6-89cf-d16fafa351f8` | v9 |
-| `ringba-conversion-webhook-test` | `6ec9dcbd-bb46-4c18-b98f-222f4ba69518` | v3 — P3.1 |
+| `pipeline-health-check` | `8a6a1519-187f-4bb6-89cf-d16fafa351f8` | v11 — failed-save probe (P3.2 A), 2026-09-16 |
+| `uptime-ping` | `7cb9643d-4299-4f06-8730-2be8daaefa09` | v1 — new, for the external uptime monitor (P3.2 A), 2026-09-16 |
+| `ringba-conversion-webhook-test` | `6ec9dcbd-bb46-4c18-b98f-222f4ba69518` | v3 — P3.1. **Still gets traffic** (1,045 calls in the 24h to 2026-09-16 8pm ET). Do not delete before the CallTools pixel is removed |
 
 ## Related documents
 
