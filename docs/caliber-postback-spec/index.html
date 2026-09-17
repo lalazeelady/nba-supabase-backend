@@ -124,7 +124,7 @@
 <div class="wrap">
 
 <header class="mast">
-  <div class="eyebrow">National Benefit Alliance &middot; integration spec &middot; rev 9 &middot; 16 September 2026</div>
+  <div class="eyebrow">National Benefit Alliance &middot; integration spec &middot; rev 10 &middot; 17 September 2026</div>
   <h1>Caliber Postback Spec</h1>
 </header>
 
@@ -205,7 +205,7 @@
 
   <div class="urlbox">
     <div class="urlbar"><span>Transfer URL</span><button class="copy" data-target="u1" type="button">Copy</button></div>
-    <pre id="u1">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-transfer-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <pre id="u1">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-transfer-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
     <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
   </div>
 
@@ -232,10 +232,13 @@
 <tr><td class="n"></td><td><span class="p">queue</span></td><td><i class="chip opt">optional</i></td><td class="d">Queue name or id.</td></tr>
 <tr><td class="n"></td><td><span class="p">agent_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Agent who handled the call.</td></tr>
 <tr class="grp"><td colspan="4">Lead fields</td></tr>
-<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. For traffic from other sources, replace <code>gclid</code> and <code>gbraid</code> with that source's click id parameter, e.g. <code>msclkid</code> or <code>fbclid</code>.</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. <b>Send every click id you have, each in its own parameter</b> &mdash; do not put one source's click id in another's parameter. A call carries only one of them, so the others arrive empty.</td></tr>
 <tr><td class="n"></td><td><span class="p">transaction_id</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Our lead id: created in Supabase when the form is submitted and passed to CallTools and Caliber with the lead. Not a Caliber or CallTools transaction or lead id.</td></tr>
 <tr><td class="n"></td><td><span class="p">gclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id.</td></tr>
 <tr><td class="n"></td><td><span class="p">gbraid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id for iOS app-to-web.</td></tr>
+<tr><td class="n"></td><td><span class="p">msclkid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Microsoft / Bing click id. <b>New in rev 10.</b> Without it a Bing call reaches Microsoft Ads only through a hashed email or phone.</td></tr>
+<tr><td class="n"></td><td><span class="p">fbclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Meta click id. <b>New in rev 10.</b></td></tr>
+<tr><td class="n"></td><td><span class="p">oppref</span></td><td><i class="chip lead">required if lead</i></td><td class="d">OpenAI click id. <b>New in rev 10.</b></td></tr>
 <tr><td class="n"></td><td><span class="p">email</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Hashed on our side. The strongest identifier for matching a call to a click.</td></tr>
 <tr><td class="n"></td><td><span class="p">state</span></td><td><i class="chip lead">required if lead</i></td><td class="d">The state the caller provided &mdash; not the state of the caller id.</td></tr>
 <tr class="grp"><td colspan="4">Additional lead fields</td></tr>
@@ -244,9 +247,6 @@
 <tr><td class="n"></td><td><span class="p">last_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Hashed on our side.</td></tr>
 <tr><td class="n"></td><td><span class="p">zip</span></td><td><i class="chip opt">optional</i></td><td class="d">The lead's postal code. Used with first + last name for the Google address match.</td></tr>
 <tr><td class="n"></td><td><span class="p">wbraid</span></td><td><i class="chip opt">optional</i></td><td class="d">Google click id for web-to-app.</td></tr>
-<tr><td class="n"></td><td><span class="p">msclkid</span></td><td><i class="chip opt">optional</i></td><td class="d">Microsoft / Bing click id.</td></tr>
-<tr><td class="n"></td><td><span class="p">fbclid</span></td><td><i class="chip opt">optional</i></td><td class="d">Meta click id.</td></tr>
-<tr><td class="n"></td><td><span class="p">oppref</span></td><td><i class="chip opt">optional</i></td><td class="d">OpenAI click id.</td></tr>
 <tr><td class="n"></td><td><span class="p">utm_source</span></td><td><i class="chip opt">optional</i></td><td class="d">Also <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>. Filled from the matched lead when empty.</td></tr>
 <tr><td class="n"></td><td><span class="p">campaignid</span></td><td><i class="chip opt">optional</i></td><td class="d">Google ValueTrack <code>{campaignid}</code>; also <code>adgroupid</code>, <code>creative</code>, <code>target</code>, <code>network</code>.</td></tr>
 <tr><td class="n"></td><td><span class="p">landing_page</span></td><td><i class="chip opt">optional</i></td><td class="d">Funnel variant that produced the lead. Filled from the matched lead when empty.</td></tr>
@@ -271,7 +271,7 @@
 
   <div class="urlbox">
     <div class="urlbar"><span>Monetize URL</span><button class="copy" data-target="u2" type="button">Copy</button></div>
-    <pre id="u2">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-monetize-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;conversion_value=[tag:User:conversion_value]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <pre id="u2">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-monetize-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;conversion_value=[tag:User:conversion_value]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
     <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
   </div>
 
@@ -292,16 +292,19 @@
 <tr><td class="n"></td><td><span class="p">queue</span></td><td><i class="chip opt">optional</i></td><td class="d">Queue name or id.</td></tr>
 <tr><td class="n"></td><td><span class="p">agent_name</span></td><td><i class="chip opt">optional</i></td><td class="d">Agent who handled the call.</td></tr>
 <tr class="grp"><td colspan="4">Lead fields</td></tr>
-<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. For traffic from other sources, replace <code>gclid</code> and <code>gbraid</code> with that source's click id parameter, e.g. <code>msclkid</code> or <code>fbclid</code>.</td></tr>
+<tr class="gnote"><td></td><td colspan="3">Required whenever lead information exists for the caller. <b>Send every click id you have, each in its own parameter</b> &mdash; do not put one source's click id in another's parameter. A call carries only one of them, so the others arrive empty.</td></tr>
 <tr><td class="n"></td><td><span class="p">transaction_id</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Our lead id: created in Supabase when the form is submitted and passed to CallTools and Caliber with the lead. Not a Caliber or CallTools transaction or lead id.</td></tr>
 <tr><td class="n"></td><td><span class="p">gclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id.</td></tr>
 <tr><td class="n"></td><td><span class="p">gbraid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Google click id for iOS app-to-web.</td></tr>
+<tr><td class="n"></td><td><span class="p">msclkid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Microsoft / Bing click id. <b>New in rev 10.</b> Without it a Bing call reaches Microsoft Ads only through a hashed email or phone.</td></tr>
+<tr><td class="n"></td><td><span class="p">fbclid</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Meta click id. <b>New in rev 10.</b></td></tr>
+<tr><td class="n"></td><td><span class="p">oppref</span></td><td><i class="chip lead">required if lead</i></td><td class="d">OpenAI click id. <b>New in rev 10.</b></td></tr>
 <tr><td class="n"></td><td><span class="p">email</span></td><td><i class="chip lead">required if lead</i></td><td class="d">Hashed on our side. The strongest identifier for matching a call to a click.</td></tr>
 <tr><td class="n"></td><td><span class="p">state</span></td><td><i class="chip lead">required if lead</i></td><td class="d">The state the caller provided &mdash; not the state of the caller id.</td></tr>
 <tr class="grp"><td colspan="4">Additional lead fields</td></tr>
 <tr class="gnote"><td></td><td colspan="3">Same list as the transfer postback. Add any you have.</td></tr>
 <tr><td class="n"></td><td><span class="p">first_name, last_name, zip</span></td><td><i class="chip opt">optional</i></td><td class="d">Hashed on our side; used together for the Google address match.</td></tr>
-<tr><td class="n"></td><td><span class="p">wbraid, msclkid, fbclid, oppref</span></td><td><i class="chip opt">optional</i></td><td class="d">Other click ids: Google web-to-app, Microsoft, Meta, OpenAI.</td></tr>
+<tr><td class="n"></td><td><span class="p">wbraid</span></td><td><i class="chip opt">optional</i></td><td class="d">Google click id for web-to-app.</td></tr>
 <tr><td class="n"></td><td><span class="p">utm_*</span></td><td><i class="chip opt">optional</i></td><td class="d"><code>utm_source</code>, <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>.</td></tr>
 <tr><td class="n"></td><td><span class="p">campaignid &hellip; network</span></td><td><i class="chip opt">optional</i></td><td class="d">Google ValueTrack: <code>campaignid</code>, <code>adgroupid</code>, <code>creative</code>, <code>target</code>, <code>network</code>.</td></tr>
 <tr><td class="n"></td><td><span class="p">landing_page</span></td><td><i class="chip opt">optional</i></td><td class="d">Funnel variant that produced the lead.</td></tr>
@@ -347,7 +350,7 @@
 </section>
 
 <footer>
-  Rev 9 &mdash; caliber_call_id added and is now the must-have call id; call_id (CallTools) is required, not must-have; publisher hard-coded NBA. Rev 8 &mdash; publisher pulled per call, not hard-coded, so the NBA gate filters. Rev 7 &mdash; cv_source hard-coded; offer pulled per call; must-have and lead-field rules clarified; all offers except Internet. Rev 6 &mdash; HTTP 422 and 503 responses.
+  Rev 10 &mdash; msclkid, fbclid and oppref added to both URLs: send every click id you have, each in its own parameter. Rev 9 &mdash; caliber_call_id added and is now the must-have call id; call_id (CallTools) is required, not must-have; publisher hard-coded NBA. Rev 8 &mdash; publisher pulled per call, not hard-coded, so the NBA gate filters. Rev 7 &mdash; cv_source hard-coded; offer pulled per call; must-have and lead-field rules clarified; all offers except Internet. Rev 6 &mdash; HTTP 422 and 503 responses.
 </footer>
 
 </div>

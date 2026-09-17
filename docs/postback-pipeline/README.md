@@ -121,7 +121,7 @@ select * from v_call_through_daily where lead_date_et = date '2026-09-17';
 | `call_id` (CallTools call id) | **0%** | The dedupe key (`call_key`). Until it arrives, dedupe falls back to phone + day, which cannot tell a real call-back from one call counted twice. Caliber is adding it. |
 | `ib_source` | 35% | Platform attribution when the call has no click id. Needed on every postback. |
 | `transaction_id` (our lead id) | 63% | The strongest lead match. Needed whenever a lead exists. |
-| `msclkid` | **0%** | **The postback URL has no msclkid parameter**, so Bing calls come back with no click id: of 93 matched calls whose lead has an msclkid, Caliber returned 0. The leads are fine (98.5% of Bing leads carry it) — add `&msclkid=`, `&fbclid=` and `&oppref=` to both URLs. We recover it from the matched lead meanwhile. |
+| `msclkid` | **0%** | The rev 9 URL had no msclkid parameter, so Bing calls came back with no click id: of 93 matched calls whose lead has an msclkid, Caliber returned 0. The leads are fine (98.5% of Bing leads carry it). **Spec rev 10 (2026-09-17) adds `msclkid`, `fbclid` and `oppref` to both URLs** — waiting for Caliber to apply it. We recover it from the matched lead meanwhile. |
 | `utm_source` | **0%** | Second attribution signal after the click id. Today attribution falls back to the route name only. |
 | `first_name`, `last_name`, `zip` | 0% | 34% of calls match no lead. With name + zip, Google can still match those calls on the hashed address block. |
 | `status` (call status) | **0%** | We drop "no connect" events. Today we rely on Caliber never sending them. |
