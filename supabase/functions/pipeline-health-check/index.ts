@@ -378,6 +378,26 @@ async function failedSaves(
   return { count: saves.length, kinds: [...kinds].slice(0, 6) };
 }
 
+// 6. POSTBACK PIPELINE (postbacks / platform_uploads, added 2026-09-17). The SQL function
+// postback_health() decides the problems (no postbacks in weekday business hours, match-rate
+// drop, failed upload checks or uploads, stuck uploads while live) so the rules live next to
+// the tables. Returns null if the probe itself fails, like the other probes.
+async function postbackHealth(
+  supabase: ReturnType<typeof createClient>,
+  uploadsLive: boolean,
+): Promise<{ problems: string[]; [k: string]: unknown } | null> {
+  const { data, error } = await supabase.rpc(
+    "postback_health",
+    { p_uploads_live: uploadsLive } as unknown as undefined,
+  );
+  if (error) {
+    console.error("postback health probe failed:", error.message);
+    return null;
+  }
+  const out = (data ?? {}) as { problems?: string[]; [k: string]: unknown };
+  return { ...out, problems: Array.isArray(out.problems) ? out.problems : [] };
+}
+
 async function lastUploadSuccess(
   supabase: ReturnType<typeof createClient>,
 ): Promise<string | null> {
@@ -416,7 +436,10 @@ Deno.serve(async (req: Request) => {
     const dropWindowIso = new Date(now - PUBLISHER_DROP_WINDOW_H * 3600000).toISOString();
     const cmConfig = auditCustomerMatch();
     const saveWindowIso = new Date(now - SAVE_FAIL_WINDOW_H * 3600000).toISOString();
-    const [backlog, lastUpload, failures, drops, saves, cmBacklog] = await Promise.all([
+    const postbackUploadsLive =
+      (Deno.env.get("GOOGLE_POSTBACK_UPLOAD_MODE") || "validate_only").toLowerCase() === "live" &&
+      (Deno.env.get("GOOGLE_POSTBACK_LIVE_OFFERS") || "").trim() !== "";
+    const [backlog, lastUpload, failures, drops, saves, cmBacklog, postbacks] = await Promise.all([
       apiBacklogCount(supabase),
       lastUploadSuccess(supabase),
       failureStats(supabase),
@@ -425,6 +448,7 @@ Deno.serve(async (req: Request) => {
       // Probed only when the audience pipeline is live. While it is off this stays
       // null-by-choice and contributes nothing to `problems` or `alert`.
       cmConfig.enabled ? customerMatchBacklog(supabase) : Promise.resolve([]),
+      postbackHealth(supabase, postbackUploadsLive),
     ]);
 
     // `config` stays a pure audit of the environment. Runtime faults (probe failures,
@@ -503,6 +527,14 @@ Deno.serve(async (req: Request) => {
     }
     const savesFailing = saves !== null && saves.count >= SAVE_FAIL_MIN;
 
+    // Postback pipeline (postbacks / platform_uploads).
+    if (postbacks === null) {
+      problems.push("Postback pipeline probe postback_health() failed — cannot tell whether Caliber postbacks are arriving, matching or uploading.");
+    } else {
+      problems.push(...postbacks.problems.map((p) => `Postbacks: ${p}`));
+    }
+    const postbacksAlert = postbacks === null || postbacks.problems.length > 0;
+
     // ---- Customer Match (independent, silent while disabled) ----------------
     // Appended AFTER the offline-conversion problems so the existing report reads
     // identically when the audience pipeline is off.
@@ -540,6 +572,7 @@ Deno.serve(async (req: Request) => {
             dropping: publisherDropping,
           },
       api: { backlog, last_success: lastUpload, stalled },
+      postbacks: postbacks === null ? { probe: "failed" } : postbacks,
       saves: saves === null
         ? { probe: "failed" }
         : { window_hours: SAVE_FAIL_WINDOW_H, failed: saves.count, kinds: saves.kinds },
@@ -576,7 +609,7 @@ Deno.serve(async (req: Request) => {
 
     const alert = stalled || rejecting || backlogUnknown || failures === null ||
       publisherDropping || drops === null || savesFailing || saves === null ||
-      !config.ok || cmAlert;
+      postbacksAlert || !config.ok || cmAlert;
     if ((alert || force) && !dryRun) {
       const resendKey = Deno.env.get("RESEND_API_KEY");
       if (resendKey) {
@@ -586,6 +619,7 @@ Deno.serve(async (req: Request) => {
         if (backlogUnknown) parts.push("BACKLOG UNKNOWN");
         if (publisherDropping) parts.push("PUBLISHER-GATE DROPS");
         if (savesFailing) parts.push("FAILED SAVES");
+        if (postbacksAlert) parts.push("POSTBACKS");
         if (!config.ok) parts.push("MISCONFIGURED");
         if (cmAlert) parts.push("CUSTOMER MATCH");
         const subject = force && !alert

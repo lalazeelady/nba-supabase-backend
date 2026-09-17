@@ -15,10 +15,14 @@
 // A validate_only or dry_run check sets validated_at + last_result and leaves status
 // 'pending'. Only a live send changes status (sent / failed).
 //
-// Google event: transactionId = caliber_call_id (unique per conversion action: transfers
-// go to CallXfer, monetized calls to CallConvertOffline), eventTimestamp, currency USD,
-// value, one click id (gclid > gbraid > wbraid), hashed email / phone, and the hashed
-// name + zip address block when all three exist.
+// Each row has a conversion_action: transfer -> CallXfer (value 0), monetize ->
+// CallConvertOffline (postback revenue). For internet (offer_rules.transfers_from_monetize)
+// one monetized postback produces both rows.
+//
+// Google event: transactionId = caliber_call_id (Google dedupes per conversion action, so
+// the transfer and the monetize upload of one call are separate conversions),
+// eventTimestamp, currency USD, value, one click id (gclid > gbraid > wbraid), hashed
+// email / phone, and the hashed name + zip address block when all three exist.
 //
 // Auth: x-invoke-secret (UPLOADER_INVOKE_SECRET).
 // Params: ?platform=google|bing|all (default all) &limit=N (default 100, max 300)
@@ -40,6 +44,7 @@ const DATA_MANAGER_ENDPOINT = "https://datamanager.googleapis.com/v1/events:inge
 interface PendingRow {
   upload_id: number;
   platform: "google" | "bing";
+  conversion_action: "transfer" | "monetize";
   attempts: number;
   validated_at: string | null;
   postback_id: string;
@@ -109,7 +114,7 @@ async function googleAccessToken(): Promise<string> {
 }
 
 async function sendGoogle(row: PendingRow, live: boolean): Promise<Outcome> {
-  const destinationId = row.event_type === "transfer"
+  const destinationId = row.conversion_action === "transfer"
     ? Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLXFER") || ""
     : Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID_CALLMONETIZE") || Deno.env.get("GOOGLE_DATA_MANAGER_DESTINATION_ID") || "";
   const accountId = Deno.env.get("GOOGLE_ADS_CUSTOMER_ID") || "";
@@ -141,7 +146,7 @@ async function sendGoogle(row: PendingRow, live: boolean): Promise<Outcome> {
     eventTimestamp: new Date(row.conversion_time).toISOString(),
     eventSource: "WEB",
     currency: CURRENCY,
-    conversionValue: Number(row.conversion_value),
+    conversionValue: row.conversion_action === "transfer" ? 0 : Number(row.conversion_value),
   };
   if (click) eventBody.adIdentifiers = click;
   if (userIdentifiers.length > 0) eventBody.userData = { userIdentifiers };
@@ -164,7 +169,7 @@ async function sendGoogle(row: PendingRow, live: boolean): Promise<Outcome> {
   let body: unknown; try { body = JSON.parse(text); } catch { body = text; }
   const result = {
     mode, http_status: res.status, response: body,
-    sent: { transactionId: row.caliber_call_id, destination: row.event_type, click_id: click ? Object.keys(click)[0] : null, identifiers: userIdentifiers.map((u) => Object.keys(u)[0]) },
+    sent: { transactionId: row.caliber_call_id, destination: row.conversion_action, click_id: click ? Object.keys(click)[0] : null, identifiers: userIdentifiers.map((u) => Object.keys(u)[0]) },
   };
   if (!live) return { kind: "checked", result: { ...result, ok: res.ok } };
   if (res.ok) return { kind: "sent", result };
@@ -179,11 +184,11 @@ async function dryRunBing(row: PendingRow): Promise<Outcome> {
   const phone = phoneE164(row.phone);
   const conversion = {
     MicrosoftClickId: row.msclkid || null,
-    ConversionName: row.event_type === "transfer"
+    ConversionName: row.conversion_action === "transfer"
       ? Deno.env.get("BING_CONVERSION_NAME_TRANSFER") || "CallXfer"
       : Deno.env.get("BING_CONVERSION_NAME_MONETIZE") || "CallConvertOffline",
     ConversionTime: new Date(row.conversion_time).toISOString(),
-    ConversionValue: Number(row.conversion_value),
+    ConversionValue: row.conversion_action === "transfer" ? 0 : Number(row.conversion_value),
     ConversionCurrencyCode: CURRENCY,
     HashedEmailAddress: email ? await sha256Hex(email) : null,
     HashedPhoneNumber: phone ? await sha256Hex(phone) : null,

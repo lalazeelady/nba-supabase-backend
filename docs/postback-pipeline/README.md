@@ -22,12 +22,13 @@ Caliber pixel ──► postback-transfer-webhook ─┐
 |---|---|
 | `postbacks` | One row per Caliber call event. Unique on `(caliber_call_id, event_type)`: a re-fire is ignored. Stores only the fields that identify and route the call, plus `raw_payload` (secret removed). |
 | `ib_source_platforms` | Editable map: inbound route name → platform (`google`, `bing`, `meta`, `openai`, `owned`). An unlisted route is unknown. |
-| `platform_uploads` | One row per postback per platform. `status`: pending, sent, failed, skipped (`skip_reason`). A validate_only / dry_run check sets `validated_at` and `last_result` and leaves status `pending`. |
+| `offer_rules` | Per-offer rules. `transfers_from_monetize` (internet): each monetized postback also uploads as the transfer; transfer postbacks for that offer do not upload. |
+| `platform_uploads` | One row per postback per platform per `conversion_action` (transfer → CallXfer, monetize → CallConvertOffline). `status`: pending, sent, failed, skipped (`skip_reason`). A validate_only / dry_run check sets `validated_at` and `last_result` and leaves status `pending`. |
 | `v_postbacks` | **The one place to look.** Postback + lead + `platform`, `attribution`, `confidence`. |
 | `v_platform_uploads_pending` | What the uploader reads. |
-| `v_recon_daily` | Count and revenue by ET day / offer / event / platform / confidence, next to uploaded, pending, failed, skipped and validated counts. |
+| `v_recon_daily` | Count and revenue by ET day / offer / conversion action / platform / confidence, next to uploaded, pending, failed, skipped and validated counts. `from_monetize = true` marks internet transfers counted from monetized postbacks. |
 | `v_call_through_daily` | Leads vs transferred / monetized leads by lead day and platform. Always filter on `lead_date_et`. |
-| `postback_health()` | JSON numbers for the (not yet enabled) alerts. |
+| `postback_health(p_uploads_live)` | Numbers and `problems` for `pipeline-health-check` (hourly email). |
 | cron `rematch-postbacks-hourly` | Retries the lead match for unmatched rows from the last 7 days. |
 
 ### Lead match (on insert, then hourly)
@@ -45,6 +46,19 @@ Caliber pixel ──► postback-transfer-webhook ─┐
 
 Postback values win; the lead fills gaps. Lead detail (names, zip, UTMs 2–5, landing page,
 IP, user agent) is read from `leads` through `lead_id`, never copied.
+
+## Upload rules (owner, 2026-09-17)
+
+- Every postback is kept. The only duplicate rule is the same `caliber_call_id` for the same
+  event (an identical re-fire). A transfer and a monetize event for the same call are two rows
+  and two uploads, even with the same timestamp. Caliber decides what counts as a conversion.
+- Upload a transfer or a monetize event when it is attributed to that platform; a monetize
+  event also needs revenue. **Unknown-source calls are never uploaded** (queued as
+  `skipped / unknown_platform` so they stay visible).
+- Internet: gross transfers = gross monetized calls. Each monetized internet postback uploads
+  twice: CallConvertOffline (revenue) and CallXfer ($0). Other offers send transfer postbacks.
+- Matching unknown-source calls to leads in other ways was tested on 2026-09-17 (221 calls,
+  $1,425): case-insensitive email recovered 0, legacy phone data recovered 7 ($45). Not added.
 
 ## Upload safety
 
@@ -79,7 +93,7 @@ select * from v_postbacks where transaction_id = '…' or lead_transaction_id = 
 select platform, confidence, sum(events) events, sum(revenue) revenue,
        sum(uploaded_revenue) uploaded_revenue, sum(skipped_events) skipped
   from v_recon_daily
- where conversion_date_et = date '2026-09-17' and event_type = 'monetize'
+ where conversion_date_et = date '2026-09-17' and conversion_action = 'monetize'
  group by rollup(platform, confidence);
 
 -- Why a row did not upload
@@ -91,16 +105,19 @@ select u.platform, u.status, u.skip_reason, u.last_result
 select * from v_call_through_daily where lead_date_et = date '2026-09-17';
 ```
 
-## Open decisions (owner)
+## Health alerts (on since 2026-09-17, in the hourly `pipeline-health-check` email)
 
-1. **Google rule for unknown-source calls.** `queue_platform_uploads()` constant
-   `c_google_include_unknown` (false today: queued as `skipped / unknown_platform`).
-2. **Repeat calls from one caller on one day.** `postbacks` keeps every call (per Caliber call id).
-   The legacy pipeline keeps one per phone per day. On 2026-09-17 by noon: 319 monetized calls from
-   230 callers ($2,118) vs legacy 230 rows ($1,517). Confirm against Caliber's revenue report.
-3. **Health-check alerts** from `postback_health()` (not enabled).
-4. **Go-live per offer:** turn off the legacy upload for that offer, then add it to
-   `GOOGLE_POSTBACK_LIVE_OFFERS` and set `GOOGLE_POSTBACK_UPLOAD_MODE=live`, then schedule the uploader.
+- No monetize postbacks for 2 hours, weekdays 10am–8pm ET.
+- No transfer postbacks for 2 hours, weekdays 10am–8pm ET, once transfers have arrived that week.
+- Lead match rate in the last 24h is 15 points below the prior 7 days.
+- Any failed upload check (validate_only / dry run) or failed upload in the last 24h.
+- Uploads pending over 2 hours, only while uploads are live.
+
+## Go live (owner decision)
+
+Not before every Caliber program sends its postbacks. Then, per offer: stop the legacy upload for
+that offer, add it to `GOOGLE_POSTBACK_LIVE_OFFERS`, set `GOOGLE_POSTBACK_UPLOAD_MODE=live`, and
+schedule the uploader.
 
 ## Rollback
 
