@@ -36,6 +36,10 @@ Caliber pixel ──► postback-transfer-webhook ─┐
 2. `transaction_id` = `leads.caliber_lead_id` (Caliber's own lead id — what it sent until 2026-09-17)
 3. `gclid` → 4. `email` → 5. `phone` (newest lead created before the call, 1h slack)
 
+Only leads created in the **90 days before the call** can match (owner, 2026-09-17): Google
+rejects a conversion whose click is older than 90 days, and an older lead is stale attribution.
+When the rule was applied, 478 of 479 matches were already inside the window.
+
 ### Platform attribution (first match wins)
 | Signal | `attribution` | `confidence` |
 |---|---|---|
