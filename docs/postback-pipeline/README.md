@@ -71,14 +71,19 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
 
 ## Upload safety
 
-- **Google:** `GOOGLE_POSTBACK_UPLOAD_MODE` = `validate_only` (default) | `live`, and
-  `GOOGLE_POSTBACK_LIVE_OFFERS` = comma list of offers allowed live (empty by default). Both must
-  allow a row before anything is stored in Google Ads. The order id is `caliber_call_id`.
-  **Never list an offer the legacy pipeline still uploads** (internet today): the legacy order id
-  is date + phone, so Google would count the call twice.
+- **Google:** an offer uploads for real only when **both** are true:
+  1. `GOOGLE_POSTBACK_UPLOAD_MODE = live` (Supabase secret, the master switch; default `validate_only`)
+  2. `offer_rules.uploads_held` is false for that offer
+  An offer missing from `offer_rules` is not held, so a new Caliber offer goes live by itself.
+  `GOOGLE_POSTBACK_LIVE_OFFERS` (optional) narrows live mode to a comma list; empty means every
+  offer that is not held. The order id is `caliber_call_id`.
+  **An offer the legacy pipeline still uploads must stay held** (internet today): the legacy
+  order id is date + phone, so Google would count the call twice.
 - **Bing:** dry run only. Sending needs Microsoft Ads API access (developer token, OAuth app,
   customer and account ids), and the manual Bing uploads must stop first.
-- No cron job runs the uploader yet. Run it by hand:
+- Cron `upload-platform-conversions-15min` runs the Google side every 15 minutes. While the
+  master switch is `validate_only` it only checks rows; it starts uploading when the switch flips.
+  To run it by hand:
   ```sql
   select net.http_post(
     url := 'https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/upload-platform-conversions?platform=google&limit=100',
@@ -164,11 +169,25 @@ distinct calls; 114 dropped as duplicates ($753); 289 skipped as unknown-source 
 - Any failed upload check (validate_only / dry run) or failed upload in the last 24h.
 - Uploads pending over 2 hours, only while uploads are live.
 
-## Go live (owner decision)
+## Go live
 
-Not before every Caliber program sends its postbacks. Then, per offer: stop the legacy upload for
-that offer, add it to `GOOGLE_POSTBACK_LIVE_OFFERS`, set `GOOGLE_POSTBACK_UPLOAD_MODE=live`, and
-schedule the uploader.
+**Non-Internet offers (2026-09-19):** Caliber sends these only to the new webhooks, and Ringba's
+remaining campaigns share no callers with them (checked over 3 days: 0 overlap), so they upload as
+soon as the master switch is set to `live`.
+
+**Internet cutover** (its postbacks go to both pipelines today), in this order:
+1. Stop the Caliber / CallTools pixel that feeds the legacy webhook.
+2. Mark the internet rows the legacy pipeline already uploaded, so the new pipeline never
+   re-sends them:
+   ```sql
+   update platform_uploads u set status = 'skipped', skip_reason = 'uploaded_by_legacy'
+     from postbacks p
+    where p.id = u.postback_id and u.status = 'pending' and p.offer = 'internet'
+      and p.conversion_time < '<cutover timestamp>';
+   ```
+3. `update offer_rules set uploads_held = false where offer = 'internet';`
+4. Watch `v_recon_daily` and the Google Ads daily totals for 48 hours: the total should stay
+   flat, with the source moving from the legacy pipeline to this one.
 
 ## Rollback
 
