@@ -3,14 +3,17 @@
 // Sends queued postbacks (public.platform_uploads, status 'pending') to the ad platforms.
 // Each run first calls queue_platform_uploads() so new postbacks join the queue.
 //
-// SAFE BY DEFAULT — nothing is stored in Google Ads or Microsoft Ads unless turned on:
-//   Google  GOOGLE_POSTBACK_UPLOAD_MODE = validate_only (default) | live
-//           GOOGLE_POSTBACK_LIVE_OFFERS = comma list of offers allowed to send live,
-//           e.g. "ene,aca". Empty by default. An offer that the legacy pipeline still
-//           uploads (internet today) must NOT be listed, or Google counts it twice: the
-//           legacy order id is date+phone, this one is caliber_call_id.
-//   Bing    dry_run only: builds the Microsoft Ads offline conversion and stores it in
-//           last_result. Sending is not built yet (needs Microsoft Ads API access).
+// SAFE BY DEFAULT — nothing is stored in Google Ads or Microsoft Ads unless turned on.
+// An offer uploads for real only when BOTH are true:
+//   1. GOOGLE_POSTBACK_UPLOAD_MODE = live            (the master switch; default validate_only)
+//   2. offer_rules.uploads_held is false for it      (a held offer never sends, even in live mode)
+// Internet is held while the legacy pipeline still uploads the same calls: the legacy order id
+// is date+phone and this one is caliber_call_id, so Google would count those calls twice.
+// GOOGLE_POSTBACK_LIVE_OFFERS (optional) narrows live mode further to a comma list of offers;
+// empty means "every offer that is not held".
+//
+// Bing is dry_run only: it builds the Microsoft Ads offline conversion and stores it in
+// last_result. Sending is not built yet (needs Microsoft Ads API access).
 //
 // A validate_only or dry_run check sets validated_at + last_result and leaves status
 // 'pending'. Only a live send changes status (sent / failed).
@@ -217,6 +220,15 @@ Deno.serve(async (req: Request) => {
 
   const supabase = createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
+  // Offers held back from real uploads (a cutover in progress). Read every run, so releasing
+  // an offer is one row in offer_rules with no redeploy.
+  const heldOffers = new Set<string>();
+  {
+    const { data, error } = await supabase.from("offer_rules").select("offer").eq("uploads_held", true);
+    if (error) return json({ ok: false, error: `read offer_rules failed: ${error.message}` }, 500);
+    for (const row of (data ?? []) as { offer: string }[]) heldOffers.add(row.offer.toLowerCase());
+  }
+
   let queued: number | null = null;
   if (doQueue) {
     const { data, error } = await supabase.rpc("queue_platform_uploads");
@@ -241,7 +253,10 @@ Deno.serve(async (req: Request) => {
 
     for (const row of (data ?? []) as PendingRow[]) {
       summary[platform].rows++;
-      const live = platform === "google" && googleMode === "live" && liveOffers.has((row.offer || "").toLowerCase());
+      const offerKey = (row.offer || "").toLowerCase();
+      const live = platform === "google" && googleMode === "live" &&
+        !heldOffers.has(offerKey) &&
+        (liveOffers.size === 0 || liveOffers.has(offerKey));
       const first = platform === "google" ? await sendGoogle(row, live) : await dryRunBing(row);
       // Not live: nothing was sent, so an error is a failed check, never an attempt or a failure.
       const outcome: Outcome = !live && first.kind !== "checked"
@@ -270,7 +285,11 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  const report = { ok: true, queued, google_mode: googleMode, google_live_offers: [...liveOffers], summary };
+  const report = {
+    ok: true, queued, google_mode: googleMode,
+    google_live_offers: liveOffers.size === 0 ? "every offer that is not held" : [...liveOffers],
+    held_offers: [...heldOffers], summary,
+  };
   await supabase.from("api_logs").insert({
     api_type: "platform-upload-run",
     transaction_id: `platform-upload-run:${new Date().toISOString()}`,
