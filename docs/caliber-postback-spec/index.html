@@ -124,7 +124,7 @@
 <div class="wrap">
 
 <header class="mast">
-  <div class="eyebrow">National Benefit Alliance &middot; integration spec &middot; rev 10 &middot; 17 September 2026</div>
+  <div class="eyebrow">National Benefit Alliance &middot; integration spec &middot; rev 11 &middot; 19 September 2026</div>
   <h1>Caliber Postback Spec</h1>
 </header>
 
@@ -174,6 +174,10 @@
       <p>CallTools gives every call an id when the call starts. Send that id in <code>call_id</code>. Do not put the Caliber call id in <code>call_id</code>. A missing <code>call_id</code> is not rejected, but send it on every call.</p>
     </div>
     <div class="rule">
+      <b><code>status</code>: send the call status</b>
+      <p><b>New in rev 11.</b> The call status, e.g. <code>connected</code> or <code>no connect</code>. We drop any postback whose status contains &ldquo;no connect&rdquo;, on every offer, before it is counted. Send it on every postback so the rule can work.</p>
+    </div>
+    <div class="rule">
       <b><code>conversion_time</code> comes from the current call</b>
       <p>Never a time from a prior call.</p>
       <p><strong>Transfer:</strong> the time the call was transfer-connected to the buyer.</p>
@@ -205,7 +209,7 @@
 
   <div class="urlbox">
     <div class="urlbar"><span>Transfer URL</span><button class="copy" data-target="u1" type="button">Copy</button></div>
-    <pre id="u1">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-transfer-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <pre id="u1">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-transfer-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;status=[tag:User:call_status]&amp;conversion_time=[tag:User:conversion_time]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
     <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
   </div>
 
@@ -227,6 +231,7 @@
 <tr><td class="n"></td><td><span class="p">publisher</span></td><td><i class="chip must">must have</i></td><td class="d">Hard-coded <b>NBA</b>. Any other value is rejected (HTTP 422).</td></tr>
 <tr><td class="n"></td><td><span class="p">ib_source</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools route name of the number called, e.g. <code>Thank You Page</code>.</td></tr>
 <tr><td class="n"></td><td><span class="p">cv_source</span></td><td><i class="chip req">required</i></td><td class="d">Hard-coded <b>caliber</b>.</td></tr>
+<tr><td class="n"></td><td><span class="p">status</span></td><td><i class="chip req">required</i></td><td class="d">Call status, e.g. <code>connected</code>. <b>New in rev 11.</b> A postback whose status contains &ldquo;no connect&rdquo; is dropped and never counted.</td></tr>
 <tr><td class="n"></td><td><span class="p">offer</span></td><td><i class="chip req">required</i></td><td class="d">The campaign or offer, pulled from the call &mdash; not hard-coded, so one postback serves every offer. Example values: <code>CPN_ENE</code>, <code>CPN_ACA</code>, <code>CPN_EDU</code>, <code>CPN_MED</code>. Hard-code it only if the value is not available. Tell the NBA team if your values differ.</td></tr>
 <tr><td class="n"></td><td><span class="p">conversion_time</span></td><td><i class="chip req">required</i></td><td class="d">The time this call was transfer-connected &mdash; from the current call, never a prior one. ISO-8601 UTC preferred. If empty, we use the time we received the postback.</td></tr>
 <tr><td class="n"></td><td><span class="p">queue</span></td><td><i class="chip opt">optional</i></td><td class="d">Queue name or id.</td></tr>
@@ -271,7 +276,7 @@
 
   <div class="urlbox">
     <div class="urlbar"><span>Monetize URL</span><button class="copy" data-target="u2" type="button">Copy</button></div>
-    <pre id="u2">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-monetize-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;conversion_time=[tag:User:conversion_time]&amp;conversion_value=[tag:User:conversion_value]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
+    <pre id="u2">https://quhxbgsgtfvrasyjvaba.supabase.co/functions/v1/postback-monetize-webhook?caller_id=[tag:InboundNumber:NumberE164]&amp;call_id=[tag:User:calltools_call_id]&amp;caliber_call_id=[tag:User:caliber_call_id]&amp;publisher=NBA&amp;ib_source=[tag:User:ib_source]&amp;cv_source=caliber&amp;offer=[tag:Campaign:Name]&amp;status=[tag:User:call_status]&amp;conversion_time=[tag:User:conversion_time]&amp;conversion_value=[tag:User:conversion_value]&amp;transaction_id=[tag:User:transaction_id]&amp;gclid=[tag:User:gclid]&amp;gbraid=[tag:User:gbraid]&amp;msclkid=[tag:User:msclkid]&amp;fbclid=[tag:User:fbclid]&amp;oppref=[tag:User:oppref]&amp;email=[tag:User:email]&amp;state=[tag:User:state]</pre>
     <p class="fallback">No custom headers on your side? Insert <code>secret=&lt;secret&gt;&amp;</code> right after the <code>?</code>. Replace each <code>[tag:&hellip;]</code> with the matching Caliber field; keep the parameter names.</p>
   </div>
 
@@ -286,6 +291,7 @@
 <tr><td class="n"></td><td><span class="p">publisher</span></td><td><i class="chip must">must have</i></td><td class="d">Hard-coded <b>NBA</b>. Any other value is rejected (HTTP 422).</td></tr>
 <tr><td class="n"></td><td><span class="p">ib_source</span></td><td><i class="chip req">required</i></td><td class="d">The CallTools route name of the number called, e.g. <code>Thank You Page</code>.</td></tr>
 <tr><td class="n"></td><td><span class="p">cv_source</span></td><td><i class="chip req">required</i></td><td class="d">Hard-coded <b>caliber</b>.</td></tr>
+<tr><td class="n"></td><td><span class="p">status</span></td><td><i class="chip req">required</i></td><td class="d">Call status, e.g. <code>connected</code>. <b>New in rev 11.</b> A postback whose status contains &ldquo;no connect&rdquo; is dropped and never counted.</td></tr>
 <tr><td class="n"></td><td><span class="p">offer</span></td><td><i class="chip req">required</i></td><td class="d">The campaign or offer, pulled from the call &mdash; not hard-coded. Example values: <code>CPN_ENE</code>, <code>CPN_ACA</code>, <code>CPN_EDU</code>, <code>CPN_MED</code>. Hard-code it only if the value is not available. Tell the NBA team if your values differ.</td></tr>
 <tr><td class="n"></td><td><span class="p">conversion_time</span></td><td><i class="chip req">required</i></td><td class="d">The time this call converted; the call end time is next best, and transfer time next after that. From the current call, never a prior one. ISO-8601 UTC preferred.</td></tr>
 <tr><td class="n"></td><td><span class="p">conversion_value</span></td><td><i class="chip req">required</i></td><td class="d">Revenue for the call as a decimal, e.g. <code>42.50</code>. A value of <code>0</code> cannot be uploaded to Google Ads.</td></tr>
@@ -350,7 +356,7 @@
 </section>
 
 <footer>
-  Rev 10 &mdash; msclkid, fbclid and oppref added to both URLs: send every click id you have, each in its own parameter. Rev 9 &mdash; caliber_call_id added and is now the must-have call id; call_id (CallTools) is required, not must-have; publisher hard-coded NBA. Rev 8 &mdash; publisher pulled per call, not hard-coded, so the NBA gate filters. Rev 7 &mdash; cv_source hard-coded; offer pulled per call; must-have and lead-field rules clarified; all offers except Internet. Rev 6 &mdash; HTTP 422 and 503 responses.
+  Rev 11 &mdash; status added to both URLs, so "no connect" calls are dropped on every offer. Rev 10 &mdash; msclkid, fbclid and oppref added to both URLs: send every click id you have, each in its own parameter. Rev 9 &mdash; caliber_call_id added and is now the must-have call id; call_id (CallTools) is required, not must-have; publisher hard-coded NBA. Rev 8 &mdash; publisher pulled per call, not hard-coded, so the NBA gate filters. Rev 7 &mdash; cv_source hard-coded; offer pulled per call; must-have and lead-field rules clarified; all offers except Internet. Rev 6 &mdash; HTTP 422 and 503 responses.
 </footer>
 
 </div>

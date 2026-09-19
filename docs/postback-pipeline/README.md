@@ -64,8 +64,11 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
 - Matching unknown-source calls to leads in other ways was tested on 2026-09-17 (221 calls,
   $1,425): case-insensitive email recovered 0, legacy phone data recovered 7 ($45). Not added.
 - **Unknown** = no click id (its own or from a matched lead), no usable `utm_source`, and no
-  mapped route name: only call data. These never upload; an unknown call can come from any
-  source, including Meta. Revisit when Caliber sends `ib_source` on every postback.
+  mapped route name: only call data. These never upload **on any offer** (owner, 2026-09-19);
+  an unknown call can come from any source, including Meta. The fix is `ib_source` on every
+  postback, not a looser upload rule.
+- **"No connect" calls are dropped at the webhook**, before they are stored and therefore before
+  dedupe, on every offer. This needs Caliber to send `status`: spec rev 11 adds it to both URLs.
 - **Meta** (`apply.nationalbenefitalliance.com`) is another entity's ads and lander. Its leads
   reach us through the call platform, but we do nothing with them.
 
@@ -175,19 +178,18 @@ distinct calls; 114 dropped as duplicates ($753); 289 skipped as unknown-source 
 remaining campaigns share no callers with them (checked over 3 days: 0 overlap), so they upload as
 soon as the master switch is set to `live`.
 
-**Internet cutover** (its postbacks go to both pipelines today), in this order:
-1. Stop the Caliber / CallTools pixel that feeds the legacy webhook.
-2. Mark the internet rows the legacy pipeline already uploaded, so the new pipeline never
-   re-sends them:
-   ```sql
-   update platform_uploads u set status = 'skipped', skip_reason = 'uploaded_by_legacy'
-     from postbacks p
-    where p.id = u.postback_id and u.status = 'pending' and p.offer = 'internet'
-      and p.conversion_time < '<cutover timestamp>';
-   ```
-3. `update offer_rules set uploads_held = false where offer = 'internet';`
-4. Watch `v_recon_daily` and the Google Ads daily totals for 48 hours: the total should stay
-   flat, with the source moving from the legacy pipeline to this one.
+**Internet cutover: done 2026-09-19 5:00pm ET**, on a quiet weekend. Both pixels still fire;
+only the uploads moved.
+- Legacy: `legacy_caliber_hold` stores any Caliber row for a call at/after the cutover with
+  status `ignored`, which the legacy uploader never selects. Ringba is untouched.
+  Rollback: drop `trg_zz_legacy_caliber_hold`, or move `legacy_caliber_upload_cutover()` forward.
+- New: 1,908 Internet uploads for pre-cutover calls were marked `uploaded_by_legacy`, then
+  `uploads_held` was set to false.
+- Parity checked on 2026-09-18, the last full day: legacy stored 731 Internet rows and uploaded
+  660 ($4,289); the new pipeline under the **same** rules would have uploaded 732 ($4,753);
+  under the new rules it uploads 486 ($3,163). The gap is the owner's rule that unknown-source
+  calls never upload (246 calls, $1,590 that day).
+- Watch `v_recon_daily` and the Google Ads daily totals for 48 hours after traffic resumes.
 
 ## Rollback
 
