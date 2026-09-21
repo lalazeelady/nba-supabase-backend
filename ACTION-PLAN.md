@@ -188,10 +188,13 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
     concurrently` cannot run inside a transaction. Quiet window 3-8am ET.
 - [x] **P2.3 Add an index on `leads(created_at)`** · done 2026-09-17 (`leads_created_at_idx`,
   CONCURRENTLY, with the postback pipeline).
-- [ ] **P2.4 Re-enable the Customer Match rollup (job 12)** · Claude
-  - Do: `cron.alter_job((select jobid from cron.job where jobname = 'customer-match-refresh-daily'), active := true)`.
-  - Why it's off: until it runs, no **new** monetized callers join the audience.
-  - Depends: P1.4, P2.1.
+- [x] **P2.4 Re-enable the Customer Match rollup (job 12)** · **done 2026-09-20.** Ran
+  `refresh_customer_match_members()` by hand first to drain the backlog since 2026-09-11:
+  **5,048 new members, 68,813 total**, then set the daily job active. The daily uploader
+  (job 13, 9:35am) sends them.
+  - Note: `mv_monetized_callers` still reads `offline_conversion_events`, so it keeps working
+    through the Internet cutover (its filter ignores `status`). When the legacy Caliber pixel is
+    switched off, its source must move to `postbacks` (P10).
 - [ ] **P2.5 Re-measure after one week** · Claude
   - Do: compare `pg_stat_statements` top queries. Decide whether to stay on Small.
   - Also identify the historic `leads.phone ilike` query (752 min total DB time). Confirm

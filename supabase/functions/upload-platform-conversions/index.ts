@@ -239,14 +239,17 @@ Deno.serve(async (req: Request) => {
   const summary: Record<string, Record<string, number>> = {};
   for (const platform of platforms) {
     summary[platform] = { rows: 0, checked_ok: 0, checked_error: 0, sent: 0, retry: 0, failed: 0 };
-    // Oldest first. A row checked (validate_only / dry_run) in the last hour is skipped, so
-    // repeated runs move through the queue instead of re-checking the same rows.
+    // Oldest first. In check mode a row checked in the last hour is skipped, so repeated runs
+    // move through the queue instead of re-checking the same rows. In live mode there is no
+    // such wait: a pending row must be sent on the next run, not up to an hour later.
+    const liveMode = platform === "google" && googleMode === "live";
     const recheckAfter = new Date(Date.now() - 3600_000).toISOString();
-    const { data, error } = await supabase
+    let query = supabase
       .from("v_platform_uploads_pending")
       .select("*")
-      .eq("platform", platform)
-      .or(`validated_at.is.null,validated_at.lt."${recheckAfter}"`)
+      .eq("platform", platform);
+    if (!liveMode) query = query.or(`validated_at.is.null,validated_at.lt."${recheckAfter}"`);
+    const { data, error } = await query
       .order("conversion_time", { ascending: true })
       .limit(limit);
     if (error) return json({ ok: false, error: `read queue failed: ${error.message}`, queued }, 500);
