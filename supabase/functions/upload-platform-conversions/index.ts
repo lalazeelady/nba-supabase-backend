@@ -22,8 +22,10 @@
 // CallConvertOffline (postback revenue). For internet (offer_rules.transfers_from_monetize)
 // one monetized postback produces both rows.
 //
-// Google event: transactionId = caliber_call_id (Google dedupes per conversion action, so
-// the transfer and the monetize upload of one call are separate conversions),
+// Google event: transactionId = the upload key from v_platform_uploads_pending.order_id --
+// calltools_call_id when Caliber sends it, else phone:offer:ET-date[:revenue]. It MUST match
+// queue_platform_uploads() dedupe or Google rejects rows we meant to keep. Google dedupes per
+// conversion action, so the transfer and the monetize upload of one call stay separate.
 // eventTimestamp, currency USD, value, one click id (gclid > gbraid > wbraid), hashed
 // email / phone, and the hashed name + zip address block when all three exist.
 //
@@ -56,6 +58,7 @@ interface PendingRow {
   caliber_call_id: string;
   conversion_time: string;
   conversion_value: number | string;
+  order_id: string;
   gclid: string | null;
   gbraid: string | null;
   wbraid: string | null;
@@ -145,7 +148,7 @@ async function sendGoogle(row: PendingRow, live: boolean): Promise<Outcome> {
   if (loginAccountId) destination.loginAccount = { accountType: "GOOGLE_ADS", accountId: loginAccountId };
 
   const eventBody: Record<string, unknown> = {
-    transactionId: row.caliber_call_id,
+    transactionId: row.order_id,
     eventTimestamp: new Date(row.conversion_time).toISOString(),
     eventSource: "WEB",
     currency: CURRENCY,
@@ -172,7 +175,7 @@ async function sendGoogle(row: PendingRow, live: boolean): Promise<Outcome> {
   let body: unknown; try { body = JSON.parse(text); } catch { body = text; }
   const result = {
     mode, http_status: res.status, response: body,
-    sent: { transactionId: row.caliber_call_id, destination: row.conversion_action, click_id: click ? Object.keys(click)[0] : null, identifiers: userIdentifiers.map((u) => Object.keys(u)[0]) },
+    sent: { transactionId: row.order_id, destination: row.conversion_action, click_id: click ? Object.keys(click)[0] : null, identifiers: userIdentifiers.map((u) => Object.keys(u)[0]) },
   };
   if (!live) return { kind: "checked", result: { ...result, ok: res.ok } };
   if (res.ok) return { kind: "sent", result };

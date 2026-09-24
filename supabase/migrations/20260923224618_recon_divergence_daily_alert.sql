@@ -1,0 +1,36 @@
+-- Recon alerting + two fixes (owner decisions, 2026-09-23)
+-- Applied live as migrations:
+--   recon_divergence_daily_alert
+--   health_pending_over_2h_google_only
+--
+-- 1. recon_divergence_problems() -- the daily reconciliation watch. Owner: the concern is
+--    Google's reported numbers DIVERGING from what we attribute and upload, not raw volume.
+--    It checks the most recent day that has platform figures entered and raises:
+--      * no Google figures entered at all, or none for more than 2 days (the recon is blind)
+--      * Google/attributed revenue outside 70-130% (absolute guard, works from day one)
+--      * Google revenue outside the upload range (click-id uploads .. total attributed)
+--      * Google/attributed moved more than 10 points off its trailing 7-day median
+--      * unknown-source revenue more than 3 points off its trailing 7-day median
+--    The two drift checks need at least 3 earlier days and stay silent until then.
+--
+--    It is appended to postback_health() and gated to the 10:00 ET hour, so it appears once a
+--    day inside the existing hourly email. No new cron, no edge function redeploy.
+--    Both patches rewrite postback_health from its own stored definition rather than retyping
+--    it, so the rest of that function is carried over verbatim.
+--
+-- 2. Fix found while testing the above: `uploads_pending_over_2h` counted EVERY platform, but
+--    Bing is dry-run only and its rows sit at 'pending' by design -- 563 of them, oldest
+--    2026-09-17. With uploads live the email would have reported "563 upload(s) pending for
+--    over 2 hours. Is the uploader running?" on every run, for ever, about a healthy queue.
+--    Now scoped to google. Revisit when Bing goes live.
+--
+-- 3. NBA_MediaExpansion mapped to 'meta' in ib_source_platforms. It is a DID belonging to
+--    another team's Meta/social buy, so it is identified traffic, not an attribution failure.
+--    It now reads as "other" everywhere -- including v_postbacks.platform and the
+--    platform_uploads skip reason -- instead of only in the scorecard. It still does not
+--    upload to Google or Bing, which is correct.
+--
+-- Not done, owner 2026-09-23: the late-postback dedupe edge case (a postback arriving late
+-- with an earlier conversion_time slips the backwards-looking duplicate check). Judged small
+-- and rare -- one pair in ~2,500 -- and the stable order id rejects it at Google anyway.
+-- No backfill of the ~$230/day of previously-skipped duplicates.

@@ -1,0 +1,46 @@
+-- Recon scorecard v3 + upload key change (owner decisions, 2026-09-23)
+-- Applied live as migrations:
+--   upload_dedupe_with_revenue_and_composed_order_id
+--   platform_reported_first_read
+--   recon_scorecard_v3_one_row_per_day
+--
+-- 1. v_recon_scorecard is now ONE ROW PER DAY. The three measures are three column blocks:
+--    rev_* (CCO revenue), cco_* (CCO conversions), xfer_* (transfer conversions).
+--
+-- 2. queue_platform_uploads() dedupe key gains revenue on the monetize side:
+--       CCO       = ET date | offer | phone | revenue
+--       transfers = ET date | offer | phone
+--    Two sales to one caller, same offer, same day, at DIFFERENT prices are two real
+--    conversions and both upload now. Worth ~33-39 conversions and ~$230/day on Google.
+--
+-- 3. The Google order id (transactionId) moved off caliber_call_id to the SAME key,
+--    served by v_platform_uploads_pending.order_id:
+--       coalesce(calltools_call_id, phone:offer:ET-date[:revenue])
+--    These two MUST stay matched. A stable order id without revenue would make Google
+--    reject the day's second sale as a duplicate -- losing exactly what change 2 keeps.
+--
+--    This also backstops a real dedupe bug found while checking for order-id collisions:
+--    queue_platform_uploads() only looks BACKWARDS in conversion_time for an already-queued
+--    sibling, so a postback that arrives late but carries an earlier conversion_time escapes
+--    the duplicate check. One pair slipped through on 2026-09-23 (caller 5097015218,
+--    internet, $7, two caliber_call_ids a minute apart, both sent). With a stable order id
+--    Google now rejects the second one. Worth fixing properly in the ranked CTE later.
+--
+-- 4. platform_reported keeps the FIRST reported figure beside the current one
+--    (first_cco_revenue, first_cco_conversions, first_xfer_conversions, first_read_at),
+--    maintained by trigger trg_platform_reported_keep_first, so late attribution growth is
+--    visible. Monday 2026-09-21 first read 954 / $13,594 / 1,151, restated to 958 / $13,614 / 1,159.
+--
+-- 5. Bing stays dry-run: *_bing_uploaded shows what WOULD send, not what did.
+--
+-- NOT done here: the already-skipped duplicate rows from before this change are NOT revived.
+-- queue_platform_uploads() only inserts where no row exists for (postback_id, platform,
+-- conversion_action), and those rows exist at status 'skipped'. The new key applies going
+-- forward only. A backfill would mean deleting those skipped rows and re-queueing.
+
+-- 6. Owner 2026-09-23: the scorecard STARTS at 2026-09-23, the first Ringba-free day
+--    (migration `recon_scorecard_start_2026_09_23`). Before that, Google's reported figures
+--    include Ringba uploads this view cannot see, so the comparison reads permanently red.
+--    public.recon_scorecard_start() returns that date; move it with one statement to change
+--    the window. The pre-cutover rows in platform_reported were deleted.
+--    No backfill of the ~$230/day of previously-skipped duplicates (owner: not worth resending).

@@ -1,0 +1,4 @@
+-- Applied live 2026-09-23. Full rationale and SQL are recorded in the companion file
+-- for this batch: 20260923223434_recon_scorecard_v3_one_row_per_day.sql and
+-- 20260923224618_recon_divergence_daily_alert.sql.
+-- This file exists so the local migration list matches the remote history exactly.

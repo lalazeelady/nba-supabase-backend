@@ -1,0 +1,19 @@
+-- Recon scorecard v2 (owner decisions, 2026-09-23)
+--
+--  * Buckets are google / bing / other / unknown. "Other" = we DO have a signal
+--    (click id, utm_source or ib_source) but it is not google or bing. An unmapped
+--    route name such as NBA_MediaExpansion belongs here, NOT in unknown.
+--  * Unknown = literally no signal: no click id, no utm_source, no ib_source.
+--  * Dedupe: CCO = ET date | offer | phone | revenue. Transfers = ET date | offer | phone.
+--    Adding the click id on top was worth 1-3 conversions and $20-50 a day, so it was
+--    dropped as immaterial. Adding revenue was worth 33-39 conversions and ~$230 a day.
+--  * internet transfers = gross monetized calls (offer_rules.transfers_from_monetize);
+--    every other offer sends its own transfer postback.
+--
+-- Known gap: google_attributed and google_uploaded do not tie, because the uploader still
+-- dedupes on offer|phone|day with no revenue in the key. Closing it means changing
+-- queue_platform_uploads AND the order id together -- see docs/offline-conversion-sop.
+--
+-- The view body is applied by migration `recon_scorecard_v2_buckets_and_keys`; this file
+-- is the record of the decision. Run `drop view public.v_recon_scorecard;` before any
+-- rebuild that removes a column -- Postgres cannot drop columns from a view in place.

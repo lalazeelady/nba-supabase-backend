@@ -3,3 +3,7 @@ node_modules/
 .env
 .env.local
 *.log
+
+# Large call-log exports pulled for reconciliation - data, not source
+caliber_call_log_*.csv
+ringba-call-log-export-*.csv
