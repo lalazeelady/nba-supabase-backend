@@ -74,8 +74,8 @@ Nothing deleted. See [`docs/bing-offline-conversions/README.md`](docs/bing-offli
 | Item | Verdict |
 |---|---|
 | `EXCEL_Conversion_Enhanced_Import_Template_*.xlsx` (5, repo root) | Manual Bing upload files. Loaded into `bing_manual_uploads`; git-ignored, not committed. Safe to move out of the repo once Bing is live. |
-| `bing_manual_uploads` | Only rows from 2026-09-16 20:00 UTC were loaded (earlier rows cannot collide). Becomes history once the manual uploads stop; keep for audit. |
-| `mark_bing_manual_uploads()` | One-shot until the manual uploads stop; after that it has no new input. Drop with the table. |
-| 4 Bing rows skipped `uploaded_by_legacy` with no manual upload ($25) | Legacy only ever uploaded to Google, so for Bing that reason is not true. Too small to act on; noted. |
+| `bing_manual_uploads` | All 5 manual files (1,201 rows). Still read on every Bing run (msclkid exclusion), so NOT an orphan while that rule stands. |
+| `mark_bing_manual_uploads()` | Called by the uploader before every Bing batch. Keep with the table. |
+| Bing rows skipped `uploaded_by_legacy` | Fixed 2026-09-25: re-opened (legacy only ever uploaded to Google). `uploaded_by_legacy` is now Google-only in practice. |
 | `postback_health()` pending check is Google-only (`20260923224651`) | ⚠️ A stuck Bing queue will not alert. Add Bing to the check when Bing goes live. |
 | 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | ⚠️ Not an orphan: a data gap. The pipeline cannot upload them. Owner to name the source of the manual files. |

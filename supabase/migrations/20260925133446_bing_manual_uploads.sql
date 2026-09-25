@@ -8,8 +8,8 @@
 -- Loaded from the Excel files with scripts/load_bing_manual_uploads.py. The files overlap,
 -- so the unique key keeps one row per (msclkid, conversion_time). Times are UTC
 -- (the template's "Parameters:TimeZone=+0000").
--- Loaded 2026-09-25: only rows from 2026-09-16 20:00 UTC (252 rows, $3,326). The first
--- postback is 2026-09-16 21:37 UTC, so earlier manual rows cannot collide with the queue.
+-- Loaded 2026-09-25 (all 5 files, 1,201 unique rows). The match rule was later changed to
+-- msclkid only: see 20260925145907_bing_manual_match_msclkid_only_send_all_transfers.sql.
 --
 -- A platform_uploads bing row is marked skipped / 'uploaded_manually' when the same msclkid
 -- was uploaded by hand within an hour of it — see mark_bing_manual_uploads().

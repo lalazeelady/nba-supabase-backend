@@ -13,7 +13,7 @@ postbacks ─► platform_uploads (platform = bing) ─► upload-platform-conve
 | Secret | Value | Meaning |
 |---|---|---|
 | `BING_UPLOAD_MODE` | `dry_run` (default) / `live` | Master switch. `dry_run` builds the conversion into `last_result` and sends nothing. |
-| `BING_LIVE_ACTIONS` | `monetize` (default) / `monetize,transfer` | Which rows send. `transfer` → goal `CallXfer`, value 0. |
+| `BING_LIVE_ACTIONS` | `monetize,transfer` (default) | Which rows send. `transfer` → goal `CallXfer`, value 0. All transfers send: none were uploaded by hand. |
 | `BING_ENHANCED` | unset / `true` | Adds hashed email + phone. Only after accepting Microsoft's enhanced-conversion terms in the Microsoft Ads UI. |
 | `BING_CONVERSION_NAME_MONETIZE` | default `CallMonetize` | Goal name. Must match Microsoft Ads exactly. |
 | `BING_CONVERSION_NAME_TRANSFER` | default `CallXfer` | Goal name. |
@@ -68,19 +68,19 @@ is ignored, a later call on the same click counts.
 
 ## Manual uploads already in Microsoft Ads
 
-`bing_manual_uploads` holds the manual rows. `mark_bing_manual_uploads()` marks a pending
-Bing monetize row `skipped` / `uploaded_manually` when the same msclkid was uploaded by hand
-within 1 hour of it. Loaded 2026-09-25 from the 5 files dated 2026-09-16 … 2026-09-23: rows from
-2026-09-16 20:00 UTC only (252 rows, $3,326). The pipeline's first postback is 2026-09-16 21:37
-UTC, so older rows cannot collide. Result: 8 rows marked.
+Owner rule (2026-09-25): **a Bing monetize row is excluded when its msclkid is in the manual
+uploads — msclkid only, any time.** Otherwise it uploads by the normal rules. Transfers were never
+uploaded by hand, so every transfer sends.
 
-Most manually uploaded calls were already out of the queue: 142 as `uploaded_by_legacy` (internet
-before the 2026-09-19 cutover) and 37 as `duplicate_call`.
+`bing_manual_uploads` holds all 5 manual files dated 2026-09-16 … 2026-09-23 (1,201 unique rows,
+$15,541.50, calls 2026-08-31 … 2026-09-22). `mark_bing_manual_uploads()` marks matching rows
+`skipped` / `uploaded_manually`; the uploader runs it before every Bing batch, so a later call on
+a manually uploaded click is excluded too. Bing rows once skipped as `uploaded_by_legacy` were
+re-opened: the legacy uploader only ever sent to Google.
 
-**If more manual uploads happen before go-live**, load the new file and re-mark:
+**If more manual uploads happen before go-live**, load the new file (the next cron run re-marks):
 ```
 python3 scripts/load_bing_manual_uploads.py <file.xlsx> > load.sql   # run load.sql in the SQL editor
-select mark_bing_manual_uploads();
 ```
 
 ## Accuracy check vs. owner's daily Bing revenue (2026-09-25)
@@ -108,9 +108,8 @@ $1,459), so the owner totals may use a different day cut or source.
 
 1. Stop the manual Bing uploads.
 2. Set `BING_UPLOAD_MODE=live`. The next cron run sends the backlog oldest first, 150 per run
-   (398 monetize rows, $4,705.50 on 2026-09-25).
+   (on 2026-09-25: 399 monetize rows and 601 transfers; see the table below).
 3. Check: `select status, skip_reason, count(*) from platform_uploads where platform='bing' group by 1,2;`
    and `last_result` on any `failed`. Conversions show in Microsoft Ads within ~6 hours.
-4. Optional: `BING_LIVE_ACTIONS=monetize,transfer` to also send `CallXfer` (445 pending).
 
 Undo: set `BING_UPLOAD_MODE=dry_run`. Rows already sent stay in Microsoft Ads.

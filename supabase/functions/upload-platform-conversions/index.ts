@@ -14,8 +14,11 @@
 //
 // Bing (Microsoft Ads ApplyOfflineConversions, REST). Same shape of switches:
 //   BING_UPLOAD_MODE = dry_run (default) | live      master switch
-//   BING_LIVE_ACTIONS = monetize (default)           comma list of conversion_actions that send;
-//                                                    the manual uploads were CallMonetize only
+//   BING_LIVE_ACTIONS = monetize,transfer (default)  comma list of conversion_actions that send
+//   bing_manual_uploads                              a monetize row whose msclkid was uploaded by
+//                                                    hand is skipped (mark_bing_manual_uploads(),
+//                                                    run before every Bing batch); transfers were
+//                                                    never uploaded by hand and all send
 //   offer_rules.uploads_held                         also holds Bing
 // Auth is Google OAuth (Microsoft accepts it with the IdentityProvider: Google header):
 // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (shared with Google Ads) + BING_GOOGLE_REFRESH_TOKEN
@@ -307,7 +310,7 @@ Deno.serve(async (req: Request) => {
   const liveOffers = new Set((Deno.env.get("GOOGLE_POSTBACK_LIVE_OFFERS") || "")
     .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
   const bingMode = (Deno.env.get("BING_UPLOAD_MODE") || "dry_run").toLowerCase();
-  const bingLiveActions = (Deno.env.get("BING_LIVE_ACTIONS") || "monetize")
+  const bingLiveActions = (Deno.env.get("BING_LIVE_ACTIONS") || "monetize,transfer")
     .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
   const supabase = createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
@@ -326,6 +329,14 @@ Deno.serve(async (req: Request) => {
     const { data, error } = await supabase.rpc("queue_platform_uploads");
     if (error) return json({ ok: false, error: `queue_platform_uploads failed: ${error.message}` }, 500);
     queued = Number(data ?? 0);
+  }
+
+  // Bing monetize rows whose msclkid was uploaded by hand never send (owner rule, 2026-09-25).
+  let bingManualSkipped: number | null = null;
+  if (platforms.includes("bing")) {
+    const { data, error } = await supabase.rpc("mark_bing_manual_uploads");
+    if (error) return json({ ok: false, error: `mark_bing_manual_uploads failed: ${error.message}`, queued }, 500);
+    bingManualSkipped = Number(data ?? 0);
   }
 
   const summary: Record<string, Record<string, number>> = {};
@@ -389,7 +400,7 @@ Deno.serve(async (req: Request) => {
   const report = {
     ok: true, queued, google_mode: googleMode,
     google_live_offers: liveOffers.size === 0 ? "every offer that is not held" : [...liveOffers],
-    bing_mode: bingMode, bing_live_actions: bingLiveActions,
+    bing_mode: bingMode, bing_live_actions: bingLiveActions, bing_manual_skipped: bingManualSkipped,
     held_offers: [...heldOffers], summary,
   };
   await supabase.from("api_logs").insert({
