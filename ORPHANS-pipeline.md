@@ -66,3 +66,16 @@ Highlights, none of them acted on:
 | `v_offline_conversion_export` + 2 sibling views readable by `anon` | ⚠️ **Pre-existing PII exposure.** No `security_invoker`, so they bypass RLS on `leads`; the publishable key can read email/phone/name/zip. Fix suggested, not applied. |
 | Dry runs bump `upload_attempts` in `upload-google-offline-conversions` | ⚠️ **Pre-existing latent bug.** Six dry-run cycles push a row past `MAX_ATTEMPTS` permanently, invisibly. Not biting while the path is live. |
 | `offline_conversion_events.offer` | Still 0 / 71,936. NOT an orphan — it is the hook the per-program audiences hang on. |
+
+## Bing offline conversions (branch `bing-offline-conversions-live`, 2026-09-25)
+
+Nothing deleted. See [`docs/bing-offline-conversions/README.md`](docs/bing-offline-conversions/README.md).
+
+| Item | Verdict |
+|---|---|
+| `EXCEL_Conversion_Enhanced_Import_Template_*.xlsx` (5, repo root) | Manual Bing upload files. Loaded into `bing_manual_uploads`; git-ignored, not committed. Safe to move out of the repo once Bing is live. |
+| `bing_manual_uploads` | Only rows from 2026-09-16 20:00 UTC were loaded (earlier rows cannot collide). Becomes history once the manual uploads stop; keep for audit. |
+| `mark_bing_manual_uploads()` | One-shot until the manual uploads stop; after that it has no new input. Drop with the table. |
+| 4 Bing rows skipped `uploaded_by_legacy` with no manual upload ($25) | Legacy only ever uploaded to Google, so for Bing that reason is not true. Too small to act on; noted. |
+| `postback_health()` pending check is Google-only (`20260923224651`) | ⚠️ A stuck Bing queue will not alert. Add Bing to the check when Bing goes live. |
+| 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | ⚠️ Not an orphan: a data gap. The pipeline cannot upload them. Owner to name the source of the manual files. |

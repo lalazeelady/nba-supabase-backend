@@ -7,3 +7,6 @@ node_modules/
 # Large call-log exports pulled for reconciliation - data, not source
 caliber_call_log_*.csv
 ringba-call-log-export-*.csv
+
+# Manual Microsoft Ads upload files - data, not source
+EXCEL_Conversion_Enhanced_Import_Template_*.xlsx
