@@ -43,6 +43,7 @@ When the rule was applied, 478 of 479 matches were already inside the window.
 ### Platform attribution (first match wins)
 | Signal | `attribution` | `confidence` |
 |---|---|---|
+| Matched to the lead by `transaction_id`: the **lead's** utm_source, then the lead's click ids (owner, 2026-09-25) | `transaction_id` | `absolute` |
 | gclid / gbraid / wbraid → google, msclkid → bing, fbclid → meta, oppref → openai | `click_id` | `absolute` |
 | `utm_source` (postback, else lead) | `utm_source` | `confident` |
 | `ib_source` via `ib_source_platforms` | `ib_source` | `confident` |
