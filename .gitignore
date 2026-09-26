@@ -10,3 +10,6 @@ ringba-call-log-export-*.csv
 
 # Manual Microsoft Ads upload files - data, not source
 EXCEL_Conversion_Enhanced_Import_Template_*.xlsx
+
+# Business revenue exports with caller phone numbers - never commit
+All bing Revenue*.xlsx

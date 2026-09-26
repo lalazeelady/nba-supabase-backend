@@ -83,28 +83,38 @@ re-opened: the legacy uploader only ever sent to Google.
 python3 scripts/load_bing_manual_uploads.py <file.xlsx> > load.sql   # run load.sql in the SQL editor
 ```
 
-## Accuracy check vs. owner's daily Bing revenue (2026-09-25)
+## Reconciliation vs. owner's Bing revenue file (Sep 17-23, done 2026-09-26)
 
-Pipeline = Bing-attributed monetize revenue in `v_recon_daily`, by ET day.
+Owner file `All bing Revenue Sep 17 - 23.xlsx` (Caliber sheet 503 rows $4,803, Ringba sheet
+86 rows $2,296; kept out of git: it holds phone numbers). Matched on `caliber_call_id`.
 
-| ET day | Owner | Pipeline | Gap |
-|---|---|---|---|
-| 09-17 | $779 | $609 | −$170 |
-| 09-18 | $787 | $603 | −$184 |
-| 09-21 | $1,188 | $830 | −$358 |
-| 09-22 | $1,354 | $1,145 | −$209 |
-| 09-23 | $2,082 | $1,538 | −$544 |
+**501 of 503 Caliber rows are in `postbacks` with identical revenue and date.**
 
-The pipeline is **lower**, and the gap is calls the pipeline never receives: 88 manual rows
-($1,981, 09-16 … 09-22) are real Bing leads (`bg1` 79, `apply2` 9) with **no Caliber postback
-at all**, not matched by msclkid, phone, or value+time. Their values ($16/$18/$51/$55) suggest a
-buyer or offer that does not send postbacks. The pipeline cannot upload revenue it never
-receives. Owner question: which report or buyer the manual files came from.
+| Date | File (Caliber) | Will upload | Uploaded by hand | Held: duplicate | Sent to Google (postback gclid) | No postback |
+|---|---|---|---|---|---|---|
+| 9/17 | $661 | $50 | $427 | $150 | $34 | — |
+| 9/18 | $610 | $76 | $439 | $95 | — | — |
+| 9/21 | $908 | $733 | $39 | $85 | — | $51 |
+| 9/22 | $1,067 | $866 | $118 | $83 | — | — |
+| 9/23 | $1,557 | $1,476 | — | $19 | $55 | $7 |
+| Total | $4,803 | $3,201 | $1,023 | $432 | $89 | $58 |
 
-The manual files themselves do not sum to the owner's totals either (e.g. 09-16: files $2,233 vs
-$1,459), so the owner totals may use a different day cut or source.
+- Pipeline Bing rows not in the file: $228 would upload (Bing phone route or Bing lead where
+  Caliber's lead record is not Bing). Kept: the dialled number decides.
+- Duplicates: same phone + ET day + offer + revenue. Owner (2026-09-26): these are re-fires,
+  keep dropping, both platforms.
+- Ringba (ended 2026-09-22): $2,112 of $2,296 already uploaded by hand; $142 never uploaded
+  (no transaction id or no msclkid). Left as is.
+- Invalid route names (`nba`, `nba-internet-calls`, `helping-hands`, `utility-benefits`,
+  `EDU IB`, `UB_ThankYou`) were pixel-test values; none since 2026-09-18.
+- The owner's earlier screenshot of daily Bing totals does not match this file or the pipeline
+  (no constant ratio or day shift); the file is the reference.
 
 ## Go live
+
+The hourly health email covers Bing: it alerts when Bing rows wait over 2 hours and nothing
+was sent in the last hour.
+
 
 1. Stop the manual Bing uploads.
 2. Set `BING_UPLOAD_MODE=live`. The next cron run sends the backlog oldest first, 150 per run

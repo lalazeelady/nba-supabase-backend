@@ -77,5 +77,5 @@ Nothing deleted. See [`docs/bing-offline-conversions/README.md`](docs/bing-offli
 | `bing_manual_uploads` | All 5 manual files (1,201 rows). Still read on every Bing run (msclkid exclusion), so NOT an orphan while that rule stands. |
 | `mark_bing_manual_uploads()` | Called by the uploader before every Bing batch. Keep with the table. |
 | Bing rows skipped `uploaded_by_legacy` | Fixed 2026-09-25: re-opened (legacy only ever uploaded to Google). `uploaded_by_legacy` is now Google-only in practice. |
-| `postback_health()` pending check is Google-only (`20260923224651`) | ⚠️ A stuck Bing queue will not alert. Add Bing to the check when Bing goes live. |
-| 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | ⚠️ Not an orphan: a data gap. The pipeline cannot upload them. Owner to name the source of the manual files. |
+| `postback_health()` pending check was Google-only | Fixed 2026-09-26: Bing stuck-queue alert added; Bing dry runs no longer raise false 'check failed' alerts. |
+| 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | Explained 2026-09-25: Ringba calls (legacy `offline_conversion_events`), already uploaded by hand. Ringba ended 2026-09-22. |
