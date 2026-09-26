@@ -457,9 +457,8 @@ Design, objects, look-ups and rollback: `docs/postback-pipeline/README.md`.
   transaction_id whenever a lead exists, msclkid / fbclid / oppref, utm_source, first/last/zip,
   call status; confirm whether one call can be monetized twice; secret in the header. Table with
   fill rates in `docs/postback-pipeline/README.md`.
-- [ ] **P10.5 Bing live** · Send built and deployed (v11, 2026-09-25, branch `bing-offline-conversions-live`),
-  Google OAuth login tested OK, manual uploads marked, cron on in dry_run. **Left: owner stops manual
-  uploads, then `BING_UPLOAD_MODE=live`.** See `docs/bing-offline-conversions/README.md`.
+- [x] **P10.5 Bing live** · 2026-09-26: manual uploads stopped, `BING_UPLOAD_MODE=live`,
+  `BING_ENHANCED=true`. First batch accepted by Microsoft. See `docs/bing-offline-conversions/README.md`.
 - [ ] **P10.6 Go live per offer** · stop the legacy upload for the offer, then
   `GOOGLE_POSTBACK_LIVE_OFFERS` + `GOOGLE_POSTBACK_UPLOAD_MODE=live` + uploader cron.
 - [ ] **P10.7 Tell Caliber** · transfer postback gets HTTP 401 (secret); `call_id` (CallTools id)
