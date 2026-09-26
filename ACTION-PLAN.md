@@ -457,7 +457,9 @@ Design, objects, look-ups and rollback: `docs/postback-pipeline/README.md`.
   transaction_id whenever a lead exists, msclkid / fbclid / oppref, utm_source, first/last/zip,
   call status; confirm whether one call can be monetized twice; secret in the header. Table with
   fill rates in `docs/postback-pipeline/README.md`.
-- [ ] **P10.5 Bing live** · Microsoft Ads API access; stop manual uploads; build the send.
+- [ ] **P10.5 Bing live** · Send built and deployed (v11, 2026-09-25, branch `bing-offline-conversions-live`),
+  Google OAuth login tested OK, manual uploads marked, cron on in dry_run. **Left: owner stops manual
+  uploads, then `BING_UPLOAD_MODE=live`.** See `docs/bing-offline-conversions/README.md`.
 - [ ] **P10.6 Go live per offer** · stop the legacy upload for the offer, then
   `GOOGLE_POSTBACK_LIVE_OFFERS` + `GOOGLE_POSTBACK_UPLOAD_MODE=live` + uploader cron.
 - [ ] **P10.7 Tell Caliber** · transfer postback gets HTTP 401 (secret); `call_id` (CallTools id)
@@ -516,7 +518,7 @@ Design, objects, look-ups and rollback: `docs/postback-pipeline/README.md`.
 | `upload-google-offline-conversions` | `8e25a878-1d52-4d01-a83f-476cb00f1a4e` | v43 |
 | `upload-google-customer-match` | `bfa3034a-344f-457b-9d5c-fb41f7516826` | v5 |
 | `pipeline-health-check` | `8a6a1519-187f-4bb6-89cf-d16fafa351f8` | v12 — failed-save probe + postback alerts, 2026-09-17 |
-| `upload-platform-conversions` | `a5a0f11b-8658-44f7-a5da-0f654301abe7` | v2 — postback uploads: Google validate_only, Bing dry run (P10) |
+| `upload-platform-conversions` | `a5a0f11b-8658-44f7-a5da-0f654301abe7` | v11 — postback uploads: Google live, Bing send built (dry_run until `BING_UPLOAD_MODE=live`), 2026-09-25 |
 | `uptime-ping` | `7cb9643d-4299-4f06-8730-2be8daaefa09` | v1 — external uptime monitor target (P3.2 A), 2026-09-16 |
 | `ringba-conversion-webhook-test` | `6ec9dcbd-bb46-4c18-b98f-222f4ba69518` | v3 — P3.1. **Still gets traffic** (1,045 calls in 24h to 2026-09-16). Do not delete before the CallTools pixel is removed |
 

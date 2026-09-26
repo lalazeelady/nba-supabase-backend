@@ -1,0 +1,3 @@
+-- Applied live 2026-09-25. The function, the one-off mark (8 rows) and the Bing cron are
+-- recorded in the companion file 20260925133446_bing_manual_uploads.sql.
+-- This file exists so the local migration list matches the remote history exactly.

@@ -13,7 +13,7 @@ Caliber pixel ──► postback-transfer-webhook ─┐
                             queue_platform_uploads() ▼
                                                platform_uploads ──► upload-platform-conversions
                                                                       Google: validate_only (default)
-                                                                      Bing:   dry_run only
+                                                                      Bing:   dry_run (default) / live
 ```
 
 ## Objects
@@ -43,6 +43,7 @@ When the rule was applied, 478 of 479 matches were already inside the window.
 ### Platform attribution (first match wins)
 | Signal | `attribution` | `confidence` |
 |---|---|---|
+| Matched to the lead by `transaction_id`: the **lead's** utm_source, then the lead's click ids (owner, 2026-09-25) | `transaction_id` | `absolute` |
 | gclid / gbraid / wbraid → google, msclkid → bing, fbclid → meta, oppref → openai | `click_id` | `absolute` |
 | `utm_source` (postback, else lead) | `utm_source` | `confident` |
 | `ib_source` via `ib_source_platforms` | `ib_source` | `confident` |
@@ -82,8 +83,9 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
   offer that is not held. The order id is `caliber_call_id`.
   **An offer the legacy pipeline still uploads must stay held** (internet today): the legacy
   order id is date + phone, so Google would count the call twice.
-- **Bing:** dry run only. Sending needs Microsoft Ads API access (developer token, OAuth app,
-  customer and account ids), and the manual Bing uploads must stop first.
+- **Bing:** sending built 2026-09-25, off until `BING_UPLOAD_MODE=live`. Cron
+  `upload-platform-conversions-bing-15min`. Setup, switches and go-live steps:
+  `docs/bing-offline-conversions/README.md`.
 - Cron `upload-platform-conversions-15min` runs the Google side every 15 minutes. While the
   master switch is `validate_only` it only checks rows; it starts uploading when the switch flips.
   To run it by hand:
