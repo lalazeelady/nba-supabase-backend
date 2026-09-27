@@ -79,4 +79,4 @@ Nothing deleted. See [`docs/bing-offline-conversions/README.md`](docs/bing-offli
 | Bing rows skipped `uploaded_by_legacy` | Fixed 2026-09-25: re-opened (legacy only ever uploaded to Google). `uploaded_by_legacy` is now Google-only in practice. |
 | `postback_health()` pending check was Google-only | Fixed 2026-09-26: Bing stuck-queue alert added; Bing dry runs no longer raise false 'check failed' alerts. |
 | 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | Explained 2026-09-25: Ringba calls (legacy `offline_conversion_events`), already uploaded by hand. Ringba ended 2026-09-22. |
-| Lead match can pick a lead created AFTER the call | ⚠️ 2 calls (Sep 17/18) matched to leads created Sep 23; Microsoft rejected them (`ConversionTimeEarlierThanClickTime`). `postback_find_lead` / the hourly rematch should only accept leads created before `conversion_time`. Small; fix later. |
+| Lead match could pick a lead created AFTER the call | Fixed 2026-09-27 (`20260927124557`): matches only accept leads created up to 1h after the call; 65 re-matched; 8 rejected Bing rows now `lead_after_call`. This was the hourly health email. |
