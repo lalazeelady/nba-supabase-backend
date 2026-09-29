@@ -80,3 +80,16 @@ Nothing deleted. See [`docs/bing-offline-conversions/README.md`](docs/bing-offli
 | `postback_health()` pending check was Google-only | Fixed 2026-09-26: Bing stuck-queue alert added; Bing dry runs no longer raise false 'check failed' alerts. |
 | 88 Bing leads with revenue but no Caliber postback ($1,981, 09-16…09-22) | Explained 2026-09-25: Ringba calls (legacy `offline_conversion_events`), already uploaded by hand. Ringba ended 2026-09-22. |
 | Lead match could pick a lead created AFTER the call | Fixed 2026-09-27 (`20260927124557`): matches only accept leads created up to 1h after the call; 65 re-matched; 8 rejected Bing rows now `lead_after_call`. This was the hourly health email. |
+
+## Upload all payouts, no dedupe (branch `no-dedupe-upload-all-payouts`, 2026-09-29)
+
+Nothing deleted.
+
+| Item | Verdict |
+|---|---|
+| cron `upload-google-offline-conversions` (job 8, every 15 min) | **Paused 2026-09-29** (owner). Legacy uploader: no Caliber call since the 2026-09-19 cutover, no Ringba since 2026-09-22. The edge function `upload-google-offline-conversions` is now unscheduled; delete it with the cron once the paused state has held for a while. |
+| cron `rematch-offline-conversions` (job 11, every 10 min) | **Paused 2026-09-29** (owner). Only fed the legacy uploader. |
+| `pipeline-health-check` legacy "stalled" check (`lastUploadSuccess`, `offline_cv_api_backlog()`) | Reads the legacy table. Backlog is 0, so it cannot alert; remove it together with the legacy uploader. |
+| `postbacks.call_key` + its set-on-insert logic | No longer read for uploads (dedupe removed). Still visible in the recon views; drop once no report uses it. |
+| `platform_uploads` rows `skipped / duplicate_call` before 2026-09-20 | Left skipped on purpose (overlap with the legacy pipeline and manual Bing uploads). Nothing new will be written with this reason. |
+| Bing upload in Supabase (`upload-platform-conversions` Bing path, cron `upload-platform-conversions-bing-15min`) | Becomes unused when Caliber uploads Bing directly. At that cutover set `BING_UPLOAD_MODE=dry_run`, then pause the cron. |

@@ -104,7 +104,9 @@ Owner file `All bing Revenue Sep 17 - 23.xlsx` (Caliber sheet 503 rows $4,803, R
 - Pipeline Bing rows not in the file: $228 would upload (Bing phone route or Bing lead where
   Caliber's lead record is not Bing). Kept: the dialled number decides.
 - Duplicates: same phone + ET day + offer + revenue. Owner (2026-09-26): these are re-fires,
-  keep dropping, both platforms.
+  keep dropping, both platforms. **Reversed 2026-09-29:** they are separate billed payouts, not
+  re-fires. No upload dedupe on either platform; rows from 2026-09-20 on were re-opened
+  (see `docs/postback-pipeline/README.md`, "No upload dedupe").
 - Ringba (ended 2026-09-22): $2,112 of $2,296 already uploaded by hand; $142 never uploaded
   (no transaction id or no msclkid). Left as is.
 - Invalid route names (`nba`, `nba-internet-calls`, `helping-hands`, `utility-benefits`,

@@ -81,8 +81,8 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
   An offer missing from `offer_rules` is not held, so a new Caliber offer goes live by itself.
   `GOOGLE_POSTBACK_LIVE_OFFERS` (optional) narrows live mode to a comma list; empty means every
   offer that is not held. The order id is `caliber_call_id`.
-  **An offer the legacy pipeline still uploads must stay held** (internet today): the legacy
-  order id is date + phone, so Google would count the call twice.
+  The legacy uploader (`upload-google-offline-conversions`) and its rematch cron were paused
+  on 2026-09-29; it had sent no Caliber call since the 2026-09-19 internet cutover.
 - **Bing:** sending built 2026-09-25, off until `BING_UPLOAD_MODE=live`. Cron
   `upload-platform-conversions-bing-15min`. Setup, switches and go-live steps:
   `docs/bing-offline-conversions/README.md`.
@@ -128,7 +128,7 @@ select * from v_call_through_daily where lead_date_et = date '2026-09-17';
 
 | Field | Filled | Why we need it |
 |---|---:|---|
-| `call_id` (CallTools call id) | **0%** | The dedupe key (`call_key`). Until it arrives, dedupe falls back to phone + day, which cannot tell a real call-back from one call counted twice. Caliber is adding it. |
+| `call_id` (CallTools call id) | **0%** | Ties several paid transfers to one physical phone call. No longer used for uploads (no dedupe since 2026-09-29); still useful for reporting. |
 | `ib_source` | 35% | Platform attribution when the call has no click id. Needed on every postback. |
 | `transaction_id` (our lead id) | 63% | The strongest lead match. Needed whenever a lead exists. |
 | `msclkid` | **0%** | The rev 9 URL had no msclkid parameter, so Bing calls came back with no click id: of 93 matched calls whose lead has an msclkid, Caliber returned 0. The leads are fine (98.5% of Bing leads carry it). **Spec rev 10 (2026-09-17) adds `msclkid`, `fbclid` and `oppref` to both URLs** — waiting for Caliber to apply it. We recover it from the matched lead meanwhile. |
@@ -145,26 +145,23 @@ Also confirm with Caliber:
 - **Send the secret in the `x-webhook-secret` header**, not in the URL. In the URL it is written to
   the edge logs.
 
-## Dedupe (business decision, 2026-09-17)
+## No upload dedupe (owner, 2026-09-29)
 
-**At the upload only.** `postbacks` keeps every event Caliber sends, so a report can show
-received vs uploaded vs dropped-as-duplicate, and revenue can be reconciled against Caliber.
+**Every paid call uploads**, Google and Bing, including a second payout for the same person on
+the same day: buyers are billed for each one. P50 billing on 9/25 ($3,102) and 9/28 ($4,542)
+matched the pipeline without dedupe ($3,066 / $4,464), not with it ($2,952 / $4,284).
 
-- **Key** = `postbacks.call_key`: `calltools_call_id` when Caliber sends it (one inbound call),
-  else the caller's phone + the Eastern-time day (what the legacy pipeline used).
-- **Scope** = per offer and per conversion action. One caller with 3 Internet calls in a day
-  uploads 1 monetize and 1 transfer conversion. The same caller monetizing Internet **and**
-  Energy on the same day uploads **both**: dedupe only removes a repeat of the same offer.
-  A transfer and a monetize event for the same call also both upload, because they go to
-  different Google actions.
-- The **earliest** event for a `call_key` keeps the upload; later ones are queued as
-  `skipped / duplicate_call` and stay visible in `v_recon_daily`.
-- The phone + day fallback cannot tell a real call-back from one call counted twice. Once
-  `calltools_call_id` arrives on every postback, the key becomes exact with no code change.
+- The only duplicate rule left is at the webhook: the same `caliber_call_id` + event is a
+  re-fire and is ignored. `caliber_call_id` is unique per paid transfer (DNI test 2026-09-28:
+  no id re-fired, shared across phones or offers, or monetized twice).
+- **Google order id = `caliber_call_id`.** Google rejects a second conversion with the same order
+  id in one action regardless of time, so the old phone + offer + day key blocked repeat payouts.
+- Rows skipped as `duplicate_call` for calls on/after 2026-09-20 were re-opened; earlier ones
+  stay skipped. Migration `20260929190000_upload_all_payouts_no_dedupe.sql`.
+- `postbacks.call_key` is still set on insert but no longer used for uploads.
 
-Effect on 2026-09-17 (Internet, by 2pm ET): 774 monetized events received ($5,119) → 605
-distinct calls; 114 dropped as duplicates ($753); 289 skipped as unknown-source ($1,946);
-371 would upload ($2,420).
+History: from 2026-09-17 to 2026-09-29 uploads were deduped per phone + ET day + offer + action
+(+ revenue from 2026-09-23); the earliest event won and later ones were `skipped / duplicate_call`.
 
 ## Health alerts (on since 2026-09-17, in the hourly `pipeline-health-check` email)
 

@@ -33,10 +33,9 @@
 // CallConvertOffline on Google / CallMonetize on Bing (postback revenue). For internet
 // (offer_rules.transfers_from_monetize) one monetized postback produces both rows.
 //
-// Google event: transactionId = the upload key from v_platform_uploads_pending.order_id --
-// calltools_call_id when Caliber sends it, else phone:offer:ET-date[:revenue]. It MUST match
-// queue_platform_uploads() dedupe or Google rejects rows we meant to keep. Google dedupes per
-// conversion action, so the transfer and the monetize upload of one call stay separate.
+// Google event: transactionId = v_platform_uploads_pending.order_id = caliber_call_id (one per
+// paid transfer; no upload dedupe since 2026-09-29). Google dedupes per conversion action, so
+// the transfer and the monetize upload of one call stay separate.
 // eventTimestamp, currency USD, value, one click id (gclid > gbraid > wbraid), hashed
 // email / phone, and the hashed name + zip address block when all three exist.
 //
