@@ -105,3 +105,4 @@ Nothing deleted.
 | `GOOGLE_POSTBACK_UPLOAD_MODE` | Still `live`. Set to `validate_only` as a second safety (owner action). |
 | Health alert "Google pending over 2 hours" (`postback_health`) | Will fire once Google transfer rows sit pending. Turn off or scope to Bing when transfers are decided. |
 | `platform_uploads` rows `skipped / uploaded_by_caliber`, `caliber_missed` | New skip reasons. Kept for reconciliation. |
+| cron `upload-platform-conversions-bing-15min` + Bing path in `upload-platform-conversions` | **Paused 2026-09-30 08:24 ET** (owner): Caliber uploads Bing directly. Set `BING_UPLOAD_MODE=dry_run` as a second safety. With both crons paused, `queue_platform_uploads()`, `v_platform_uploads_pending`, `bing_manual_uploads` / `mark_bing_manual_uploads()` and the Bing health checks are idle. Remove once Caliber's uploads have run clean for a while. |

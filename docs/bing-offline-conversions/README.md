@@ -1,6 +1,6 @@
 # Bing (Microsoft Ads) offline conversions
 
-**Status: LIVE since 2026-09-26** (`BING_UPLOAD_MODE=live`, `BING_ENHANCED=true`, manual uploads stopped).
+**Status: PAUSED 2026-09-30 08:24 ET: Caliber uploads Bing directly.** (Was live from 2026-09-26.) (`BING_UPLOAD_MODE=live`, `BING_ENHANCED=true`, manual uploads stopped).
 
 The postback pipeline uploads Bing calls to Microsoft Ads. It replaces the manual Excel uploads
 (Microsoft "Enhanced Import" template, goal `CallMonetize`, keyed on msclkid).
