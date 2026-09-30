@@ -93,3 +93,15 @@ Nothing deleted.
 | `postbacks.call_key` + its set-on-insert logic | No longer read for uploads (dedupe removed). Still visible in the recon views; drop once no report uses it. |
 | `platform_uploads` rows `skipped / duplicate_call` before 2026-09-20 | Left skipped on purpose (overlap with the legacy pipeline and manual Bing uploads). Nothing new will be written with this reason. |
 | Bing upload in Supabase (`upload-platform-conversions` Bing path, cron `upload-platform-conversions-bing-15min`) | Becomes unused when Caliber uploads Bing directly. At that cutover set `BING_UPLOAD_MODE=dry_run`, then pause the cron. |
+
+## Google paid calls moved to Caliber (branch `google-monetize-caliber-cutover`, 2026-09-30)
+
+Nothing deleted.
+
+| Item | Verdict |
+|---|---|
+| cron `upload-platform-conversions-15min` (Google side) | **Paused 2026-09-29 17:00** (owner). Unused while Caliber uploads Google. Unschedule once transfers are decided. |
+| `upload-platform-conversions` Google path (`sendGoogle`, Data Manager destination secrets) | Unused while the cron is paused. Keep until transfers are decided and Caliber's Google upload has run clean for a while. |
+| `GOOGLE_POSTBACK_UPLOAD_MODE` | Still `live`. Set to `validate_only` as a second safety (owner action). |
+| Health alert "Google pending over 2 hours" (`postback_health`) | Will fire once Google transfer rows sit pending. Turn off or scope to Bing when transfers are decided. |
+| `platform_uploads` rows `skipped / uploaded_by_caliber`, `caliber_missed` | New skip reasons. Kept for reconciliation. |

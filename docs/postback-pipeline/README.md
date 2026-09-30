@@ -73,6 +73,22 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
 - **Meta** (`apply.nationalbenefitalliance.com`) is another entity's ads and lander. Its leads
   reach us through the call platform, but we do nothing with them.
 
+## Google paid calls: Caliber uploads directly (since 2026-09-29 17:00 ET)
+
+- Caliber uploads Google conversions itself. Our Google cron `upload-platform-conversions-15min`
+  is **paused**, and `queue_platform_uploads()` queues Google **monetize** rows for calls on/after
+  the cutover as `skipped / uploaded_by_caliber` (migration `20260930120000`).
+- Google **transfer** rows still queue as `pending` (not sent: the cron is paused) until the owner
+  decides who owns transfers. See the reconciliation below.
+- Reconciliation 17:00-22:36 on 9/29 (Caliber upload log vs our queue): paid calls 223 of 228
+  matched on phone + amount + time ($2,899 of $2,930); 5 Internet calls ($31) missing on
+  Caliber's side (`caliber_missed`). Transfers: Caliber 310 vs ours 239. Caliber sends a CallXfer
+  for **every Internet transfer event**, paid or not (Caliber sends us no Internet transfer
+  postbacks at all); the business counts Internet transfers = paid Internet calls, every record.
+- Cutover catch-up sent by us: 405 paid calls ($4,869) + 536 transfers from before 17:00, and
+  24 transfers after 17:00 whose phone had no Caliber transfer.
+- Bing is unchanged: still uploaded from here until Caliber takes it over.
+
 ## Upload safety
 
 - **Google:** an offer uploads for real only when **both** are true:
