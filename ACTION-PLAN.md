@@ -426,7 +426,7 @@ Full report: `docs/pipeline-incident-2026-09-14/README.md` and `ORPHANS.md`.
 
 - [ ] **P9.1 Fix the backend path in `nba3/CLAUDE.md`** · Claude
   - It says `/Users/larazielin/Desktop/nba/nba-supabase-backend/`. The real path is
-    `/Users/larazielin/WORKSPACES/claude-workspace/claude-code/NBA/nba-supabase-backend`.
+    `/Users/larazielin/WORKSPACES/sites/NBA/nba-supabase-backend`.
   - Its backend section also predates the dual-CRM setup (`DECISIONS.md` wins).
 - [ ] **P9.2 Keep `docs/customer-match/README.md` → "Production state" current** · Claude
 - [ ] **P9.3 Mark removed items in the `ORPHANS-*.md` files** · Claude
@@ -488,8 +488,8 @@ Design, objects, look-ups and rollback: `docs/postback-pipeline/README.md`.
 | Compute | Micro (1 GB) → target **Small** (P1.4) |
 | Customer Match audience | List ID `9470111997` (secret `GOOGLE_CM_AUDIENCE_ID_ALL`) |
 | Google Cloud project | `893010372944` (Google Ads API access EXPLORER, customer `435-872-7539`) |
-| Backend repo | GitHub `lalazeelady/nba-supabase-backend` · `/Users/larazielin/WORKSPACES/claude-workspace/claude-code/NBA/nba-supabase-backend` |
-| Site repo | `/Users/larazielin/WORKSPACES/claude-workspace/claude-code/NBA/nba3` |
+| Backend repo | GitHub `lalazeelady/nba-supabase-backend` · `/Users/larazielin/WORKSPACES/sites/NBA/nba-supabase-backend` |
+| Site repo | `/Users/larazielin/WORKSPACES/sites/NBA/nba3` |
 
 **Cron jobs**
 

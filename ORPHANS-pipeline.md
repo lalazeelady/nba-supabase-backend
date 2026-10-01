@@ -28,7 +28,7 @@ so they are surface area to reason about on any schema change.
 | `offline_conversion_events.status = 'ready_to_upload'` | Pre-rename alias for `monetize_ready`, renamed 2026-08-07. Nothing has written it since, but it is still accepted in three places: `ELIGIBLE_STATUSES` in the uploader, `offline_cv_api_backlog()`, and the health check's mirror of that list. **Confirmed 0 of 97,862 rows carry it** (Sep 2026), so it is safe to remove from all three at once — they must stay in step. |
 | `v_offline_conversion_export.session_attributes` / `.user_agent` | Both hardcoded `NULL::text` in the view, while the webhooks go to some trouble to collect and backfill `user_agent`. Either wire the column through or stop collecting it; right now it is a dead end that looks live. |
 
-## Site repo (`claude-workspace/claude-code/NBA`)
+## Site repo (`WORKSPACES/sites/NBA/nba3`)
 
 | path | notes |
 |---|---|
