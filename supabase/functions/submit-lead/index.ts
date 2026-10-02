@@ -142,10 +142,25 @@ async function postToCaliber(args: {
       li_fat_id: args.payload.li_fat_id || undefined,
       twclid: args.payload.twclid || undefined,
       epik: args.payload.epik || undefined,
+      // Google / Bing ValueTrack ids (campaign, ad group, keyword, ad). Omitted when absent.
+      gcid: clip(args.payload.gcid, 100) ?? undefined,
+      gagid: clip(args.payload.gagid, 100) ?? undefined,
+      gkid: clip(args.payload.gkid, 100) ?? undefined,
+      gad: clip(args.payload.gad, 100) ?? undefined,
+      mcid: clip(args.payload.mcid, 100) ?? undefined,
+      magid: clip(args.payload.magid, 100) ?? undefined,
+      mkid: clip(args.payload.mkid, 100) ?? undefined,
+      mad: clip(args.payload.mad, 100) ?? undefined,
       // Context + consent-mode (all omitted when empty; funnel captures click_timestamp +
       // consent_ad_* later — required only for EU/UK, which NBA doesn't run).
-      referrer: args.refererUrl || undefined,
-      landing_page: args.payload.landing_page || undefined,
+      // referrer = where the visitor came from (document.referrer on the landing page,
+      // e.g. https://www.google.com/). The HTTP Referer of this request is our own last
+      // funnel step, so it is NOT used here; omitted when the browser had none.
+      referrer: clip(args.payload.page_referrer, 2048) ?? undefined,
+      // landing_page = full landing URL with query string, so Caliber can recover any id
+      // dropped in the funnel. Falls back to the short funnel id for pages cached from
+      // before the funnel sent landing_url.
+      landing_page: clip(args.payload.landing_url, 2048) ?? (args.payload.landing_page || undefined),
       // Publisher / sub-publisher, mirroring what CallTools gets as `pubid`.
       publisher: args.payload.publisher || undefined,
       click_timestamp: args.payload.click_timestamp || undefined,
@@ -310,6 +325,19 @@ interface LeadPayload {
   utm_term?: string;
   lead_source?: string;   // explicit source override (funnel-supplied, later)
   landing_page?: string;  // landing-page id: apply1 / apply2 / info01 / ... (funnel-supplied, later)
+  // Ad-platform ValueTrack ids, captured from the landing URL (Caliber, 2026-10-02).
+  gcid?: string;   // Google campaign id
+  gagid?: string;  // Google ad group id
+  gkid?: string;   // Google keyword / target id
+  gad?: string;    // Google ad (creative) id
+  mcid?: string;   // Bing campaign id
+  magid?: string;  // Bing ad group id
+  mkid?: string;   // Bing keyword id
+  mad?: string;    // Bing ad id
+  // Full first landing URL with query string, and document.referrer on that page.
+  // Caliber receives these as attribution.landing_page / attribution.referrer.
+  landing_url?: string;
+  page_referrer?: string;
   // Benefit interests from the landing-page tiles (food / utility / housing /
   // other). Collected into sessionStorage on every funnel today; the funnel
   // starts posting it in the matching site-repo change. Array or CSV string.
@@ -322,6 +350,14 @@ interface LeadPayload {
   // here so it stops being an untyped `as any` read.
   form_duration_ms?: number;
   hp_website?: string;
+}
+
+// Trimmed, length-capped browser-supplied string; blank -> null. Caps keep a
+// malformed or hostile value from bloating the row or the partner POST.
+function clip(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t ? t.slice(0, max) : null;
 }
 
 // Best-effort lead source from utm_source until the funnel sends an explicit lead_source.
@@ -562,6 +598,17 @@ Deno.serve(async (req: Request) => {
         form_duration_ms: typeof formDuration === "number" ? formDuration : null,
         needs: needs || null,
         publisher: (payload.publisher && String(payload.publisher).trim()) || null,
+        // Ad-platform ids + full landing URL + browser referrer (Caliber, 2026-10-02).
+        gcid: clip(payload.gcid, 100),
+        gagid: clip(payload.gagid, 100),
+        gkid: clip(payload.gkid, 100),
+        gad: clip(payload.gad, 100),
+        mcid: clip(payload.mcid, 100),
+        magid: clip(payload.magid, 100),
+        mkid: clip(payload.mkid, 100),
+        mad: clip(payload.mad, 100),
+        landing_url: clip(payload.landing_url, 2048),
+        page_referrer: clip(payload.page_referrer, 2048),
       })
       .select()
       .single();
