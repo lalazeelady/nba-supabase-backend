@@ -151,6 +151,18 @@ async function postToCaliber(args: {
       magid: clip(args.payload.magid, 100) ?? undefined,
       mkid: clip(args.payload.mkid, 100) ?? undefined,
       mad: clip(args.payload.mad, 100) ?? undefined,
+      // Meta (in-house, Caliber 2026-10-19). Caliber posts Lead/Purchase to Meta's
+      // Conversions API server-side, so it needs the browser match keys (fbp/fbc cookies)
+      // plus the visitor's IP + user agent: this post comes from our server, not the
+      // browser, so Caliber can't see them otherwise. Omitted when absent.
+      fbp: clip(args.payload.fbp, 255) ?? undefined,
+      fbc: clip(args.payload.fbc, 1024) ?? undefined,
+      mcpid: clip(args.payload.mcpid, 100) ?? undefined,
+      masid: clip(args.payload.masid, 100) ?? undefined,
+      madid: clip(args.payload.madid, 100) ?? undefined,
+      mplc: clip(args.payload.mplc, 100) ?? undefined,
+      client_ip: args.clientIp !== "unknown" ? args.clientIp : undefined,
+      user_agent: args.userAgent || undefined,
       // Context + consent-mode (all omitted when empty; funnel captures click_timestamp +
       // consent_ad_* later — required only for EU/UK, which NBA doesn't run).
       // referrer = where the visitor came from (document.referrer on the landing page,
@@ -334,6 +346,14 @@ interface LeadPayload {
   magid?: string;  // Bing ad group id
   mkid?: string;   // Bing keyword id
   mad?: string;    // Bing ad id
+  // Meta: browser cookies read at submit, and ids from the ad's click URL (Caliber,
+  // 2026-10-19). Forwarded to Caliber only; not stored on the lead (owner decision).
+  fbp?: string;    // _fbp cookie
+  fbc?: string;    // _fbc cookie, or built from fbclid when the pixel was blocked
+  mcpid?: string;  // Meta campaign id
+  masid?: string;  // Meta ad set id
+  madid?: string;  // Meta ad id
+  mplc?: string;   // Meta placement (e.g. Instagram_Reels)
   // Full first landing URL with query string, and document.referrer on that page.
   // Caliber receives these as attribution.landing_page / attribution.referrer.
   landing_url?: string;
