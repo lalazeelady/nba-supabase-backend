@@ -75,6 +75,12 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
 
 ## Upload safety
 
+> **Current state (owner, 2026-10-20): Caliber uploads NBA's offline conversions to Google Ads
+> directly.** Our Google uploader is off on purpose: cron `upload-platform-conversions-15min` has been
+> paused (`active=false`) since 2026-09-30, and nothing has been sent from `platform_uploads` since then.
+> Postbacks are still received and stored, so the recon views keep working. This is not an outage. Do
+> not re-enable the cron without the owner, or Google would get the same calls twice.
+
 - **Google:** an offer uploads for real only when **both** are true:
   1. `GOOGLE_POSTBACK_UPLOAD_MODE = live` (Supabase secret, the master switch; default `validate_only`)
   2. `offer_rules.uploads_held` is false for that offer
@@ -86,7 +92,8 @@ IP, user agent) is read from `leads` through `lead_id`, never copied.
 - **Bing:** sending built 2026-09-25, off until `BING_UPLOAD_MODE=live`. Cron
   `upload-platform-conversions-bing-15min`. Setup, switches and go-live steps:
   `docs/bing-offline-conversions/README.md`.
-- Cron `upload-platform-conversions-15min` runs the Google side every 15 minutes. While the
+- Cron `upload-platform-conversions-15min` runs the Google side every 15 minutes when active
+  (**paused since 2026-09-30**, see the note above). While the
   master switch is `validate_only` it only checks rows; it starts uploading when the switch flips.
   To run it by hand:
   ```sql
